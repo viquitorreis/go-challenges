@@ -6,20 +6,23 @@ import (
 )
 
 func main() {
-	fmt.Println("=== Go Challenges Demo ===\n")
+	fmt.Println("=== Go Challenges Demo ===")
+	fmt.Println()
 
 	// String challenges
 	fmt.Println("String Challenges:")
 	fmt.Printf("ReverseString('hello'): %s\n", challenges.ReverseString("hello"))
 	fmt.Printf("IsPalindrome('racecar'): %v\n", challenges.IsPalindrome("racecar"))
-	fmt.Printf("IsPalindrome('hello'): %v\n\n", challenges.IsPalindrome("hello"))
+	fmt.Printf("IsPalindrome('hello'): %v\n", challenges.IsPalindrome("hello"))
+	fmt.Println()
 
 	// Array challenges
 	fmt.Println("Array Challenges:")
 	nums := []int{1, 5, 3, 9, 2}
 	fmt.Printf("FindMax(%v): %d\n", nums, challenges.FindMax(nums))
 	fmt.Printf("FindMin(%v): %d\n", nums, challenges.FindMin(nums))
-	fmt.Printf("Sum(%v): %d\n\n", nums, challenges.Sum(nums))
+	fmt.Printf("Sum(%v): %d\n", nums, challenges.Sum(nums))
+	fmt.Println()
 
 	// Algorithm challenges
 	fmt.Println("Algorithm Challenges:")
