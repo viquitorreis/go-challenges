@@ -91,6 +91,36 @@ Run tests for a specific file:
 go test -v strings_test.go strings.go
 ```
 
+## Example
+
+See `examples/demo.go` for a complete example. Run it with:
+
+```bash
+cd examples && go run demo.go
+```
+
+Output:
+```
+=== Go Challenges Demo ===
+
+String Challenges:
+ReverseString('hello'): olleh
+IsPalindrome('racecar'): true
+IsPalindrome('hello'): false
+
+Array Challenges:
+FindMax([1 5 3 9 2]): 9
+FindMin([1 5 3 9 2]): 1
+Sum([1 5 3 9 2]): 20
+
+Algorithm Challenges:
+Fibonacci(10): 55
+FibonacciIterative(15): 610
+Factorial(5): 120
+IsPrime(17): true
+IsPrime(20): false
+```
+
 ## Project Structure
 
 ```
@@ -101,6 +131,8 @@ go test -v strings_test.go strings.go
 ├── arrays_test.go      # Tests for array challenges
 ├── strings.go          # String manipulation challenges
 ├── strings_test.go     # Tests for string challenges
+├── examples/
+│   └── demo.go        # Demo showcasing all challenges
 ├── go.mod              # Go module file
 └── README.md           # This file
 ```
