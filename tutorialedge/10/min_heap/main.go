@@ -2,8 +2,8 @@ package main
 
 import (
 	"bufio"
+	"container/heap"
 	"fmt"
-	"sort"
 	"strings"
 )
 
@@ -19,45 +19,66 @@ func main() {
 }
 
 func CountWords(text string) map[string]int {
-	freq := make(map[string]int)
+	count := make(map[string]int, 0)
 
 	scanner := bufio.NewScanner(strings.NewReader(text))
 	scanner.Split(bufio.ScanWords)
 	for scanner.Scan() {
-		// fmt.Printf("word is: %s\n", scanner.Text())
-		freq[scanner.Text()]++
+		count[scanner.Text()]++
 	}
 
-	return freq
+	return count
 }
 
-type Word struct {
-	str  string
-	freq int
-	len  int
-}
+func Top5Words(wordmap map[string]int) []word {
+	maxHeap := &Word{}
+	heap.Init(maxHeap)
 
-func Top5Words(wordmap map[string]int) []Word {
-	// 1. converter o map em slice
-	words := make([]Word, 0, len(wordmap))
-
-	for word, freq := range wordmap {
-		words = append(words, Word{
-			str:  word,
-			freq: freq,
-			len:  len(word),
+	for k, v := range wordmap {
+		heap.Push(maxHeap, word{
+			w:    k,
+			freq: v,
 		})
 	}
 
-	// 2. ordenar por frequencia
-	sort.Slice(words, func(i, j int) bool {
-		return words[i].freq > words[j].freq // asc
-	})
+	top5 := []word{}
 
-	// 3. retornar as top 5
-	if len(words) == 5 {
-		return words
+	for i := 0; i < 5; i++ {
+		popped := heap.Pop(maxHeap).(word)
+		// fmt.Printf("%s: %d\n", popped.w, popped.freq)
+		top5 = append(top5, popped)
 	}
 
-	return words[:5]
+	return top5
+}
+
+type word struct {
+	w    string
+	freq int
+}
+
+type Word []word
+
+func (w *Word) Push(x any) {
+	*w = append(*w, x.(word))
+}
+
+func (w *Word) Pop() any {
+	old := *w
+	n := len(old)
+	x := (*w)[n-1]
+	*w = (*w)[:n-1]
+	return x
+}
+
+func (w *Word) Less(i, j int) bool {
+	return (*w)[i].freq > (*w)[j].freq
+}
+
+func (w *Word) Len() int {
+	return len(*w)
+}
+
+func (w *Word) Swap(i, j int) {
+	(*w)[i], (*w)[j] = (*w)[j], (*w)[i]
 }
