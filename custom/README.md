@@ -325,3 +325,258 @@ func (la *LogAggregator) Stop() []LogEntry {
 }
 
 ```
+
+## Image Pipeline
+
+Você vai construir um pipeline de 4 stages onde cada stage processa imagens e passa para o próximo, tudo rodando concorrentemente. É como uma linha de montagem, enquanto o Stage 1 está listando novos arquivos, o Stage 2 já está carregando imagens anteriores, o Stage 3 processando (converter em gray scale), e o Stage 4 salvando.
+
+**O que fazer**: stages encadeados onde cada um procesa e passa para o próximo.
+
+**Importante**: No Fan-In tinhamos multiplos produtores enviando para UM channel central. Aqui temos uma **corrente de channels**:
+
+```
+Generator → [channel1] → Loader → [channel2] → Processor → [channel3] → Saver
+   (lista)              (carrega)              (processa)              (salva)
+   arquivos             imagem                 grayscale               disco
+```
+
+### Os 4 Stages
+
+**Stage 1** - Generator: Lista todos os arquivos .jpg e .png do diretório de input
+
+- Saída: channel de ImageJob com apenas o Path preenchido
+
+**Stage 2** - Loader: Carrega cada imagem do disco para memória
+
+- Entrada: jobs com path
+- Saída: jobs com Image carregado
+
+**Stage 3** - Processor: Converte imagens para grayscale
+
+- Entrada: jobs com imagem colorida
+- Saída: jobs com imagem em tons de cinza
+
+**Stage 4** - Saver: Salva imagens processadas no disco
+
+- Entrada: jobs com imagem processada
+- Saída: nenhuma (é o fim do pipeline)
+
+### Os 3 Desafios Principais
+
+#### 1. Conectar os Stages com Channels
+
+- Cada stage lê de um channel e escreve no próximo
+- Você precisa criar os channels intermediários e conectar tudo no Run()
+
+#### 2. Graceful Shutdown
+
+- Cada stage precisa fechar seu output channel quando o input channel fechar
+- Como saber quando o pipeline inteiro terminou? (WaitGroup para cada stage?)
+
+#### 3. Context Cancellation
+
+- Se o context cancelar (timeout ou erro), todos os stages devem parar imediatamente
+- Use select com ctx.Done() em pontos estratégicos
+
+### Como começar
+
+1. Implementar o ```generator```
+	- Use ```filepath.Glob()``` para listar os arquivos
+
+```go
+files, _ := filepath.Glob(filepath.Join(inputDir, "*.jpg"))
+```
+
+2. Implementar o ```loader```
+	- Use ```image.Decode()```
+
+```go
+file, _ := os.Open(job.Path)
+img, _, _ := image.Decode(file)
+```
+
+3. Implemente o ```processor```
+	- Loop pelos pixels e converta para grayscale:
+
+```
+grayImg := image.NewGray(img.Bounds())
+// loop pelos pixels, calcular média RGB, setar no grayImg
+```
+
+4. Implementar o ```saver```. Use ```jpeg.Encode()```
+
+jpeg.Encode(file, job.Image, &jpeg.Options{Quality: 90})
+
+5. Conecte tudo no ```Run()``` criando channels e lançando goroutines
+
+### Dicas Importantes
+
+- Fechar channels: Cada stage deve fazer defer close(outputChan) no início
+- WaitGroup: Você vai precisar de um WaitGroup para cada stage ou um para todos? Pensa no fluxo
+- Buffered channels: Use buffer nos channels intermediários (ex: 10) para evitar bloqueios
+- Context: Em cada loop, faça select { case <-ctx.Done(): return } para respeitar cancellation
+
+### Para Testar
+
+```
+# Rodar testes
+go test -v
+
+# Verificar race conditions
+go test -race
+```
+
+### Main e assinaturas:
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"image"
+	"os"
+	"path/filepath"
+	"time"
+)
+
+func main() {
+	fmt.Println("=== Image Processing Pipeline ===")
+	fmt.Println("Pipeline Pattern: Generator → Loader → Processor → Saver\n")
+
+	// Criar diretórios se não existirem
+	inputDir := "./input_images"
+	outputDir := "./output_images"
+	
+	if err := os.MkdirAll(inputDir, 0755); err != nil {
+		fmt.Printf("Erro criando input dir: %v\n", err)
+		return
+	}
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		fmt.Printf("Erro criando output dir: %v\n", err)
+		return
+	}
+
+	// Criar algumas imagens de teste se não existirem
+	createTestImages(inputDir)
+
+	// Criar pipeline
+	pipeline := NewPipeline(inputDir, outputDir)
+
+	// Context com timeout de 30 segundos
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Executar pipeline
+	fmt.Printf("Processando imagens de %s...\n", inputDir)
+	start := time.Now()
+
+	if err := pipeline.Run(ctx); err != nil {
+		fmt.Printf("Erro no pipeline: %v\n", err)
+		return
+	}
+
+	elapsed := time.Since(start)
+	fmt.Printf("\n✓ Pipeline concluído em %v\n", elapsed)
+	fmt.Printf("✓ Imagens salvas em %s\n", outputDir)
+	fmt.Println("\nRun 'go test -v' to verify your implementation")
+}
+
+// ImageJob representa uma imagem no pipeline
+type ImageJob struct {
+	Path   string      // caminho do arquivo original
+	Image  image.Image // imagem carregada (nil nos primeiros stages)
+	Error  error       // erro se algo deu errado
+	StageNum int       // apenas para debug
+}
+
+// Pipeline gerencia os 4 stages de processamento
+type Pipeline struct {
+	// TODO: adicione campos necessários para:
+	// - Channels entre stages
+	// - Context para cancellation
+	// - WaitGroup para coordenação
+	// - Caminho dos diretórios input/output
+}
+
+func NewPipeline(inputDir, outputDir string) *Pipeline {
+	return &Pipeline{
+		// TODO: inicialize campos
+	}
+}
+
+// Run executa o pipeline completo
+func (p *Pipeline) Run(ctx context.Context) error {
+	// TODO: conecte os 4 stages usando channels
+	// Generator → fileChan → Loader → imageChan → Processor → processedChan → Saver
+	
+	// Dica: cada stage deve ser uma goroutine
+	// Dica: use WaitGroup para saber quando tudo terminou
+	// Dica: passe o context para poder cancelar em caso de erro
+	
+	return nil
+}
+
+// Stage 1: Generator - lista arquivos de imagens no diretório
+func (p *Pipeline) generator(ctx context.Context, outputChan chan<- ImageJob) {
+	// TODO: 
+	// 1. Listar arquivos .jpg e .png no inputDir usando filepath.Glob ou filepath.Walk
+	// 2. Para cada arquivo, criar um ImageJob com o Path
+	// 3. Enviar para o outputChan
+	// 4. Fechar o outputChan quando terminar (importante!)
+	// 5. Respeitar o context - se ctx.Done(), parar imediatamente
+	
+	defer close(outputChan)
+	
+	// Hint: filepath.Glob("dir/*.jpg") ou filepath.Walk
+	// Hint: select { case <-ctx.Done(): return; case outputChan <- job: }
+}
+
+// Stage 2: Loader - carrega imagens do disco
+func (p *Pipeline) loader(ctx context.Context, inputChan <-chan ImageJob, outputChan chan<- ImageJob) {
+	// TODO:
+	// 1. Receber jobs do inputChan
+	// 2. Para cada job, abrir o arquivo (os.Open)
+	// 3. Decodificar a imagem (image.Decode ou jpeg.Decode/png.Decode)
+	// 4. Colocar a imagem no job.Image
+	// 5. Se der erro, colocar em job.Error
+	// 6. Enviar job para outputChan
+	// 7. Fechar outputChan quando inputChan fechar
+	
+	defer close(outputChan)
+	
+	// Hint: import "image/jpeg" e "image/png"
+	// Hint: image.Decode detecta o formato automaticamente
+	// Hint: não esqueça de fechar o arquivo: defer file.Close()
+}
+
+// Stage 3: Processor - processa as imagens (grayscale)
+func (p *Pipeline) processor(ctx context.Context, inputChan <-chan ImageJob, outputChan chan<- ImageJob) {
+	// TODO:
+	// 1. Receber jobs com imagens carregadas
+	// 2. Converter para grayscale (percorrer pixels e calcular média RGB)
+	// 3. Ou redimensionar (usar bounds e criar nova imagem menor)
+	// 4. Atualizar job.Image com a imagem processada
+	// 5. Enviar para outputChan
+	
+	defer close(outputChan)
+	
+	// Hint: bounds := img.Bounds()
+	// Hint: new image: image.NewGray(bounds) ou image.NewRGBA(bounds)
+	// Hint: loop: for y := bounds.Min.Y; y < bounds.Max.Y; y++ { for x := ... }
+}
+
+// Stage 4: Saver - salva imagens processadas
+func (p *Pipeline) saver(ctx context.Context, inputChan <-chan ImageJob) {
+	// TODO:
+	// 1. Receber jobs com imagens processadas
+	// 2. Criar arquivo no outputDir (mesmo nome, adicionar sufixo "_processed")
+	// 3. Encode da imagem no formato JPEG
+	// 4. Fechar arquivo
+	// 5. Imprimir sucesso ou erro
+	
+	// Hint: novoNome := strings.TrimSuffix(basename, ext) + "_processed.jpg"
+	// Hint: jpeg.Encode(file, img, &jpeg.Options{Quality: 90})
+	// Não precisa fechar channel aqui - é o último stage
+}
+```
