@@ -85,16 +85,15 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 
 	wg.Go(func() {
-		// defer wg.Done()
-		go p.generator(context.Background(), fileChan) // primeiro escrevemos no filechan
+		p.generator(context.Background(), fileChan) // primeiro escrevemos no filechan
 	})
 
 	wg.Go(func() {
-		go p.loader(ctx, fileChan, imageChan)
+		p.loader(ctx, fileChan, imageChan)
 	})
 
 	wg.Go(func() {
-		go p.processor(ctx, imageChan, processedChan)
+		p.processor(ctx, imageChan, processedChan)
 	})
 
 	wg.Go(func() {
