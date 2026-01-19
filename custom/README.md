@@ -245,7 +245,7 @@ func main() {
 	// aguardar logs serem gerados
 	time.Sleep(time.Millisecond * 200)
 
-	fmt.Println("\nStopping aggregator...")
+	fmt.Println("Stopping aggregator...")
 	logs := agg.Stop()
 
 	fmt.Printf("\n=== Collected %d logs ===\n", len(logs))
@@ -257,12 +257,12 @@ func main() {
 		// fmt.Printf("[%s] %s: %s\n", log.Source, log.Level, log.Message)
 	}
 
-	fmt.Println("\nLogs per service:")
+	fmt.Println("Logs per service:")
 	for service, count := range bySource {
 		fmt.Printf("  %s: %d logs\n", service, count)
 	}
 
-	fmt.Println("\nRun 'go test -v' to verify your implementation")
+	fmt.Println("Run 'go test -v' to verify your implementation")
 	fmt.Println("Run 'go test -race' to check for race conditions")
 }
 
@@ -442,7 +442,7 @@ import (
 
 func main() {
 	fmt.Println("=== Image Processing Pipeline ===")
-	fmt.Println("Pipeline Pattern: Generator → Loader → Processor → Saver\n")
+	fmt.Println("Pipeline Pattern: Generator → Loader → Processor → Saver")
 
 	// Criar diretórios se não existirem
 	inputDir := "./input_images"
@@ -479,7 +479,7 @@ func main() {
 	elapsed := time.Since(start)
 	fmt.Printf("\n✓ Pipeline concluído em %v\n", elapsed)
 	fmt.Printf("✓ Imagens salvas em %s\n", outputDir)
-	fmt.Println("\nRun 'go test -v' to verify your implementation")
+	fmt.Println("Run 'go test -v' to verify your implementation")
 }
 
 // ImageJob representa uma imagem no pipeline
@@ -578,5 +578,538 @@ func (p *Pipeline) saver(ctx context.Context, inputChan <-chan ImageJob) {
 	// Hint: novoNome := strings.TrimSuffix(basename, ext) + "_processed.jpg"
 	// Hint: jpeg.Encode(file, img, &jpeg.Options{Quality: 90})
 	// Não precisa fechar channel aqui - é o último stage
+}
+```
+
+## TCP Chat Server
+
+Este desafio é diferente dos anteriores porque você vai trabalhar com sockets TCP de baixo nível. Quando alguém conecta com telnet localhost 6969, você está recebendo uma conexão TCP bruta. Você precisa ler bytes dessa conexão, interpretar como mensagens, e enviar bytes de volta. É exatamente assim que servidores reais funcionam por baixo do capô.
+
+### A Arquitetura do Sistema
+
+Pensa num chat como Discord ou Slack. Quando você envia uma mensagem, ela precisa chegar em todos os outros usuários que estão online naquele canal. Mas tem algumas complexidades interessantes aqui.
+
+- Primeiro, cada usuário tem sua própria conexão de rede independente, você não pode simplesmente "gritar" a mensagem e todo mundo ouve. Você precisa enviar ativamente para cada conexão individual.
+- Segundo, essas conexões podem estar em velocidades diferentes, um usuário pode estar numa conexão lenta de celular enquanto outro está em fibra ótica. Se você esperar o usuário lento responder antes de enviar para o próximo, todos ficam esperando.
+- Terceiro, usuários podem desconectar a qualquer momento sem avisar, o cabo de rede pode ser desconectado fisicamente.
+
+### Os três Componentes Principais
+
+Você vai construir três sistemas que trabalham juntos.
+
+1. O primeiro é o **sistema de lobby**, que é uma sala de espera. Imagine que você está organizando um jogo de futebol e precisa esperar pelo menos dois jogadores chegarem antes de começar. Enquanto só tem um jogador, ele fica esperando. Quando o segundo chega, você libera ambos para jogar. Este sistema usa **sync.Cond**, que é uma primitiva de sincronização perfeita para "acordar" múltiplas goroutines quando uma condição muda. É como um alarme que toca para todo mundo ao mesmo tempo.
+
+2. O segundo componente é o **sistema de broadcast**. Quando um cliente envia uma mensagem, você precisa distribuir para todos os outros clientes conectados. A forma mais idiomática em Go é dar para cada cliente seu próprio channel de mensagens. Quando alguém envia uma mensagem, você itera pelos clientes e envia a mensagem para o channel de cada um. Cada cliente tem uma goroutine dedicada lendo desse channel e escrevendo na conexão TCP. Isso resolve o problema de clientes lentos - se o channel de um cliente encher porque ele está lento, você simplesmente pula ele ao invés de bloquear todos os outros.
+
+3. O terceiro componente é o **gerenciamento de conexões**. Cada cliente precisa de pelo menos duas goroutines, uma que fica lendo da conexão TCP (esperando mensagens chegarem) e outra que fica lendo do channel de mensagens e escrevendo na conexão TCP (enviando mensagens para o cliente). Quando um cliente desconecta, você precisa limpar esses recursos - fechar goroutines, remover do map de clientes ativos, fechar channels. Se não fizer isso direito, você tem vazamento de goroutines e memória.
+
+### Como começar
+
+Comece pelo mais simples possível. Implemente apenas o ```Start``` e faça ele aceitar uma conexão. Nem precisa fazer nada com a conexão ainda, só aceitar e imprimir que alguém conectou. Teste com telnet localhost 6969 em outro terminal. Quando você vir "cliente conectou", você sabe que a parte de networking básica funciona.
+
+
+```go
+package main
+
+import (
+	"context"
+	"net"
+	"time"
+)
+
+/*
+═══════════════════════════════════════════════════════════════════════════
+TODO - PASSOS PARA IMPLEMENTAR O TCP CHAT SERVER
+═══════════════════════════════════════════════════════════════════════════
+
+1. CRIAR O SERVER
+   - Usar net.Listen para escutar em uma porta (ex: :6969)
+   - Aceitar conexões de clientes com Accept() em um loop
+   - Para cada cliente que conecta, criar uma goroutine
+
+2. LOBBY (SALA DE ESPERA)
+   - Usar sync.Cond para bloquear clientes até ter mínimo de 2 players
+   - Quando cliente conecta, incrementar contador
+   - Se atingir mínimo, fazer Broadcast() para liberar todos
+   - Clientes ficam esperando em Wait() até o Broadcast
+
+3. GERENCIAR CLIENTES
+   - Guardar cada cliente em um map (clientID -> Client)
+   - Cada cliente precisa de um channel para receber mensagens
+   - Quando cliente envia mensagem, fazer broadcast para TODOS os outros
+
+4. BROADCAST DE MENSAGENS
+   - Ler mensagem do cliente A
+   - Enviar para os channels de todos os outros clientes (B, C, D...)
+   - Usar goroutines separadas: uma lê, outra escreve
+
+5. HANDLE DISCONNECT
+   - Quando cliente desconecta, remover do map
+   - Notificar outros clientes
+   - Fechar o channel do cliente que saiu
+
+6. GRACEFUL SHUTDOWN
+   - Context para cancelar tudo quando server parar
+   - Fechar todas as conexões ativas
+   - Esperar goroutines terminarem com WaitGroup
+
+═══════════════════════════════════════════════════════════════════════════
+*/
+
+
+func main() {
+	fmt.Println("=== TCP Chat Server com Lobby ===")
+	fmt.Println("Network Programming: TCP + sync.Cond + Broadcast")
+
+	// Criar servidor que espera mínimo de 2 players
+	server := NewChatServer("6969", 2)
+
+	// Context com timeout de 5 minutos
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	// Iniciar servidor em goroutine
+	go func() {
+		fmt.Println("👽 Server listening on :6969")
+		fmt.Println("Connect with: telnet localhost 6969")
+		fmt.Println("Waiting for at least 2 players to start...")
+		
+		if err := server.Start(ctx); err != nil {
+			fmt.Printf("Server error: %v\n", err)
+		}
+	}()
+
+	// Simular alguns clients para teste (remova isso depois)
+	time.Sleep(1 * time.Second)
+	
+	fmt.Println("To test:")
+	fmt.Println("   Terminal 1: telnet localhost 6969")
+	fmt.Println("   Terminal 2: telnet localhost 6969")
+	fmt.Println("   Type messages and press Enter")
+	fmt.Println("   Press Ctrl+C to stop server")
+
+	// Manter servidor rodando
+	<-ctx.Done()
+	fmt.Println("Timeout reached, stopping server...")
+
+
+	server.Stop()
+	fmt.Println("Server stopped")
+}
+
+// Message representa uma mensagem no chat
+type Message struct {
+	From    string
+	Content string
+	Time    time.Time
+}
+
+// Client representa um cliente conectado
+type Client struct {
+	// TODO: adicione campos necessários:
+	// - ID único do cliente
+	// - Conexão net.Conn
+	// - Channel para receber mensagens
+	// - Reader/Writer para ler/escrever na conexão
+}
+
+// ChatServer gerencia o servidor de chat
+type ChatServer struct {
+	// TODO: adicione campos necessários:
+	// - Porta do servidor
+	// - Map de clientes ativos
+	// - Mutex para proteger o map
+	// - sync.Cond para o lobby
+	// - Contador de clientes
+	// - Mínimo de players para começar
+	// - WaitGroup para coordenação
+}
+
+type IChatServer interface {
+	Start(ctx context.Context) error
+	Stop() error
+}
+
+// NewChatServer cria um novo servidor de chat
+func NewChatServer(port string, minPlayers int) IChatServer {
+	return &ChatServer{
+		// TODO: inicialize os campos
+	}
+}
+
+// Start inicia o servidor TCP
+func (s *ChatServer) Start(ctx context.Context) error {
+	// TODO:
+	// 1. Criar listener TCP com net.Listen("tcp", ":"+port)
+	// 2. Loop infinito aceitando conexões com listener.Accept()
+	// 3. Para cada conexão aceita, criar um Client e chamar handleClient em goroutine
+	// 4. Respeitar ctx.Done() para shutdown
+
+	// Hint:
+	// listener, err := net.Listen("tcp", ":6969")
+	// for { conn, err := listener.Accept() }
+
+	return nil
+}
+
+// handleClient gerencia um cliente conectado
+func (s *ChatServer) handleClient(ctx context.Context, conn net.Conn) {
+	// TODO:
+	// 1. Criar um Client com ID único e conexão
+	// 2. Adicionar cliente ao map (thread-safe com mutex)
+	// 3. LOBBY: Verificar se atingiu mínimo de players
+	//    - Se sim, fazer Broadcast() para liberar todos
+	//    - Se não, fazer Wait() para esperar
+	// 4. Iniciar duas goroutines:
+	//    - readLoop: lê mensagens do cliente
+	//    - writeLoop: envia mensagens para o cliente
+	// 5. Quando cliente desconectar, remover do map e notificar outros
+
+	defer conn.Close()
+
+	// Hint: Use sync.Cond para o lobby
+	// s.cond.L.Lock()
+	// s.playerCount++
+	// if s.playerCount >= s.minPlayers {
+	//     s.cond.Broadcast()
+	// } else {
+	//     s.cond.Wait()
+	// }
+	// s.cond.L.Unlock()
+}
+
+// readLoop lê mensagens de um cliente
+func (s *ChatServer) readLoop(ctx context.Context, client *Client) {
+	// TODO:
+	// 1. Criar um bufio.Scanner ou bufio.Reader na conexão
+	// 2. Loop lendo linhas da conexão
+	// 3. Para cada mensagem recebida, fazer broadcast para todos outros clientes
+	// 4. Se erro de leitura (cliente desconectou), sair do loop
+
+	// Hint:
+	// scanner := bufio.NewScanner(client.conn)
+	// for scanner.Scan() {
+	//     msg := scanner.Text()
+	//     s.broadcast(client.ID, msg)
+	// }
+}
+
+// writeLoop envia mensagens para um cliente
+func (s *ChatServer) writeLoop(ctx context.Context, client *Client) {
+	// TODO:
+	// 1. Loop lendo do channel de mensagens do cliente
+	// 2. Para cada mensagem, escrever na conexão
+	// 3. Se ctx cancelar ou channel fechar, sair
+
+	// Hint:
+	// for msg := range client.messages {
+	//     fmt.Fprintf(client.conn, "%s: %s\n", msg.From, msg.Content)
+	// }
+}
+
+// broadcast envia uma mensagem para todos os clientes exceto o remetente
+func (s *ChatServer) broadcast(fromID string, content string) {
+	// TODO:
+	// 1. Criar uma mensagem
+	// 2. Iterar pelo map de clientes (thread-safe com mutex)
+	// 3. Para cada cliente diferente do remetente:
+	//    - Enviar mensagem para o channel do cliente
+	//    - Usar select com default para não bloquear se channel cheio
+
+	// Hint: Use select com default para não bloquear
+	// select {
+	// case client.messages <- msg:
+	// default:
+	//     // Cliente está lento/desconectado, pular
+	// }
+}
+
+// removeClient remove um cliente e notifica outros
+func (s *ChatServer) removeClient(clientID string) {
+	// TODO:
+	// 1. Lock no mutex
+	// 2. Remover cliente do map
+	// 3. Fechar o channel de mensagens do cliente
+	// 4. Unlock no mutex
+	// 5. Fazer broadcast que o cliente saiu
+	// 6. Decrementar playerCount
+}
+
+// Stop para o servidor gracefully
+func (s *ChatServer) Stop() error {
+	// TODO:
+	// 1. Fechar listener
+	// 2. Fechar todas as conexões ativas
+	// 3. Esperar WaitGroup terminar
+
+	return nil
+}
+```
+
+- The test file is: 
+
+```go
+package main
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"net"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestServer_AcceptsConnections(t *testing.T) {
+	server := NewChatServer("18080", 1) // porta diferente para não conflitar
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Iniciar servidor
+	go server.Start(ctx)
+	time.Sleep(100 * time.Millisecond) // dar tempo pro servidor subir
+
+	// Conectar cliente
+	conn, err := net.Dial("tcp", "localhost:18080")
+	if err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+	defer conn.Close()
+
+	t.Log("Client connected successfully")
+}
+
+func TestServer_LobbyWaitsForMinPlayers(t *testing.T) {
+	server := NewChatServer("18081", 2) // precisa de 2 players
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go server.Start(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	// Conectar primeiro cliente
+	conn1, err := net.Dial("tcp", "localhost:18081")
+	if err != nil {
+		t.Fatalf("Client 1 failed to connect: %v", err)
+	}
+	defer conn1.Close()
+
+	// Dar tempo para entrar no lobby
+	time.Sleep(200 * time.Millisecond)
+
+	// Conectar segundo cliente
+	conn2, err := net.Dial("tcp", "localhost:18081")
+	if err != nil {
+		t.Fatalf("Client 2 failed to connect: %v", err)
+	}
+	defer conn2.Close()
+
+	// Quando 2o cliente conecta, ambos devem ser liberados do lobby
+	time.Sleep(200 * time.Millisecond)
+
+	t.Log("Lobby released after 2 players connected")
+}
+
+func TestServer_BroadcastMessage(t *testing.T) {
+	server := NewChatServer("18082", 2)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go server.Start(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	// Conectar dois clientes
+	conn1, err := net.Dial("tcp", "localhost:18082")
+	if err != nil {
+		t.Fatalf("Client 1 failed: %v", err)
+	}
+	defer conn1.Close()
+
+	conn2, err := net.Dial("tcp", "localhost:18082")
+	if err != nil {
+		t.Fatalf("Client 2 failed: %v", err)
+	}
+	defer conn2.Close()
+
+	// Esperar lobby liberar
+	time.Sleep(300 * time.Millisecond)
+
+	// Cliente 1 envia mensagem
+	fmt.Fprintf(conn1, "Hello from client 1\n")
+
+	// Cliente 2 deve receber
+	reader := bufio.NewReader(conn2)
+	conn2.SetReadDeadline(time.Now().Add(2 * time.Second))
+
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("Client 2 didn't receive message: %v", err)
+	}
+
+	if !strings.Contains(line, "Hello from client 1") {
+		t.Errorf("Expected message with 'Hello from client 1', got: %s", line)
+	}
+
+	t.Log("Message broadcast successfully")
+}
+
+func TestServer_MultipleClients(t *testing.T) {
+	server := NewChatServer("18083", 2)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go server.Start(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	// Conectar 3 clientes
+	var conns []net.Conn
+	for i := 0; i < 3; i++ {
+		conn, err := net.Dial("tcp", "localhost:18083")
+		if err != nil {
+			t.Fatalf("Client %d failed: %v", i+1, err)
+		}
+		conns = append(conns, conn)
+		defer conn.Close()
+	}
+
+	// Esperar lobby liberar
+	time.Sleep(300 * time.Millisecond)
+
+	// Cliente 1 envia mensagem
+	fmt.Fprintf(conns[0], "Broadcast test\n")
+
+	// Clientes 2 e 3 devem receber
+	for i := 1; i < 3; i++ {
+		reader := bufio.NewReader(conns[i])
+		conns[i].SetReadDeadline(time.Now().Add(2 * time.Second))
+
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Errorf("Client %d didn't receive: %v", i+1, err)
+			continue
+		}
+
+		if !strings.Contains(line, "Broadcast test") {
+			t.Errorf("Client %d got wrong message: %s", i+1, line)
+		}
+	}
+
+	t.Log("Message broadcast to all clients")
+}
+
+func TestServer_ClientDisconnect(t *testing.T) {
+	server := NewChatServer("18084", 2)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go server.Start(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	// Conectar 3 clientes
+	conn1, _ := net.Dial("tcp", "localhost:18084")
+	conn2, _ := net.Dial("tcp", "localhost:18084")
+	conn3, _ := net.Dial("tcp", "localhost:18084")
+
+	time.Sleep(300 * time.Millisecond)
+
+	// Cliente 1 desconecta
+	conn1.Close()
+	time.Sleep(200 * time.Millisecond)
+
+	// Cliente 2 envia mensagem
+	fmt.Fprintf(conn2, "After disconnect\n")
+
+	// Cliente 3 deve receber (cliente 1 não, pois desconectou)
+	reader := bufio.NewReader(conn3)
+	conn3.SetReadDeadline(time.Now().Add(2 * time.Second))
+
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("Client 3 should still receive: %v", err)
+	}
+
+	if !strings.Contains(line, "After disconnect") {
+		t.Errorf("Got wrong message: %s", line)
+	}
+
+	conn2.Close()
+	conn3.Close()
+
+	t.Log("Server handles disconnect correctly")
+}
+
+func TestServer_EmptyMessage(t *testing.T) {
+	server := NewChatServer("18085", 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	go server.Start(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	conn, err := net.Dial("tcp", "localhost:18085")
+	if err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+	defer conn.Close()
+
+	// Enviar mensagem vazia
+	fmt.Fprintf(conn, "\n")
+
+	time.Sleep(100 * time.Millisecond)
+
+	t.Log("Server handles empty messages")
+}
+
+// Teste de stress - múltiplas mensagens rápidas
+func TestServer_RapidMessages(t *testing.T) {
+	server := NewChatServer("18086", 2)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	go server.Start(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	conn1, _ := net.Dial("tcp", "localhost:18086")
+	defer conn1.Close()
+
+	conn2, _ := net.Dial("tcp", "localhost:18086")
+	defer conn2.Close()
+
+	time.Sleep(300 * time.Millisecond)
+
+	// Enviar 50 mensagens rápidas
+	go func() {
+		for i := 0; i < 50; i++ {
+			fmt.Fprintf(conn1, "Message %d\n", i)
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	// Cliente 2 deve receber todas (ou a maioria se buffer encher)
+	reader := bufio.NewReader(conn2)
+	received := 0
+
+	for i := 0; i < 50; i++ {
+		conn2.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, err := reader.ReadString('\n')
+		if err != nil {
+			break
+		}
+		received++
+	}
+
+	if received < 45 { // Aceitar perder algumas mensagens por buffer cheio
+		t.Errorf("Only received %d/50 messages", received)
+	} else {
+		t.Logf("Received %d/50 rapid messages", received)
+	}
 }
 ```

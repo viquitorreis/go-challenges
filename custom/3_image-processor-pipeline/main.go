@@ -19,7 +19,6 @@ func main() {
 	fmt.Println("=== Image Processing Pipeline ===")
 	fmt.Println("Pipeline Pattern: Generator -> Loader -> Processor -> Saver")
 
-	// Criar diretórios se não existirem
 	inputDir := "./assets/image_processor_pipeline/input"
 	outputDir := "./assets/image_processor_pipeline/output"
 
@@ -32,14 +31,11 @@ func main() {
 		return
 	}
 
-	// Criar pipeline
 	pipeline := NewPipeline(inputDir, outputDir)
 
-	// Context com timeout de 30 segundos
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Executar pipeline
 	fmt.Printf("Processando imagens de %s...\n", inputDir)
 	start := time.Now()
 
@@ -49,8 +45,8 @@ func main() {
 	}
 
 	elapsed := time.Since(start)
-	fmt.Printf("\n✓ Pipeline concluído em %v\n", elapsed)
-	fmt.Printf("✓ Imagens salvas em %s\n", outputDir)
+	fmt.Printf("\nPipeline concluído em %v\n", elapsed)
+	fmt.Printf("Imagens salvas em %s\n", outputDir)
 	fmt.Println("\nRun 'go test -v' to verify your implementation")
 }
 
