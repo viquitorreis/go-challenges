@@ -335,7 +335,7 @@ Você vai construir um pipeline de 4 stages onde cada stage processa imagens e p
 **Importante**: No Fan-In tinhamos multiplos produtores enviando para UM channel central. Aqui temos uma **corrente de channels**:
 
 ```
-Generator → [channel1] → Loader → [channel2] → Processor → [channel3] → Saver
+Generator -> [channel1] -> Loader -> [channel2] -> Processor -> [channel3] -> Saver
    (lista)              (carrega)              (processa)              (salva)
    arquivos             imagem                 grayscale               disco
 ```
@@ -442,7 +442,7 @@ import (
 
 func main() {
 	fmt.Println("=== Image Processing Pipeline ===")
-	fmt.Println("Pipeline Pattern: Generator → Loader → Processor → Saver")
+	fmt.Println("Pipeline Pattern: Generator -> Loader -> Processor -> Saver")
 
 	// Criar diretórios se não existirem
 	inputDir := "./input_images"
@@ -508,7 +508,7 @@ func NewPipeline(inputDir, outputDir string) *Pipeline {
 // Run executa o pipeline completo
 func (p *Pipeline) Run(ctx context.Context) error {
 	// TODO: conecte os 4 stages usando channels
-	// Generator → fileChan → Loader → imageChan → Processor → processedChan → Saver
+	// Generator -> fileChan -> Loader -> imageChan -> Processor -> processedChan -> Saver
 	
 	// Dica: cada stage deve ser uma goroutine
 	// Dica: use WaitGroup para saber quando tudo terminou
@@ -1111,5 +1111,322 @@ func TestServer_RapidMessages(t *testing.T) {
 	} else {
 		t.Logf("Received %d/50 rapid messages", received)
 	}
+}
+```
+
+## Rate Limiter Com Token Bucket
+
+Você vai implementar um rate limiter thread-safe usando o algoritmo **Token Bucket**. 
+
+Este é um componente fundamental em sistemas de produção, toda API pública usa alguma forma de rate limiting. Empresas como Stripe, GitHub, e AWS usam variações desse algoritmo para proteger seus serviços contra sobrecarga.
+
+**O que você vai construir:** Um rate limiter que aceita ou rejeita requisições baseado em um bucket de tokens que se reabastece continuamente. Múltiplas goroutines vão tentar consumir tokens simultaneamente enquanto uma goroutine em background adiciona tokens periodicamente.
+
+### Introdução
+
+**Por quê fazer esse challenge?**
+
+Rate limiting aparece em todo lugar em engenharia de backend. Quando você faz uma chamada para a API do GitHub, eles te dão 5000 requests/hora. Quando você usa Redis Cloud, eles limitam operações por segundo. Quando você constrói uma API REST, você precisa proteger seus endpoints de abuse.
+
+**Empresas que usam:** Stripe (payment processing), CloudFlare (DDoS protection), Redis (cloud limits), toda API REST moderna. Em entrevistas para Tailscale, LiveKit, ou GitLab, e FAANGS saber implementar rate limiting do zero é diferencial forte.
+
+**O que exatamente você vai construir?**
+
+Um rate **limiter** baseado em **Token Bucket** que:
+
+- Mantém um bucket com capacidade máxima de N tokens
+- Adiciona tokens ao bucket a uma taxa constante (ex: 10 tokens/segundo)
+- Quando uma requisição chega, tenta consumir 1 token
+- Se tem token disponível -> aceita a requisição
+- Se não tem token -> rejeita (ou opcionalmente espera)
+
+Você vai testar isso simulando 100 goroutines fazendo requests simultaneamente. Algumas vão passar, outras vão ser rejeitadas conforme os tokens esgotam e se reabastecem.
+
+**Quais são os 2-3 desafios principais?**
+
+1. **Reabastecimento contínuo de tokens:** Como adicionar tokens periodicamente sem criar um timer por requisição? Pense direito para não gerar goroutines leaks.
+2. **sincronização entre consumidores e producers:** Múltiplas goroutines tentando consumir tokens simultaneamente, enquanto uma goroutine adiciona tokens. Você precisa de mutex, mas onde? Se for um mutex geral, vai ter uma performance ruim. Se não sincronizar corretamente, perde token ou conta errado.
+3. **Modelar o bucket de forma eficiente:** *Não é permitido* ter um array gigante com todos os tokens. Precisa apenas rastrear quantos tokens existem atualmente e quando foi a última vez que adicionou tokens. É um problema de modelagem de estado.
+
+### Background Técnico
+
+**Pattern: Token Bucket Algorithm**
+
+Imagine um balde que comporta no máximo 100 moedas (tokens). A cada segundo, alguém joga 10 moedas novas no balde. Se já está cheio, as moedas extras caem fora (capacidade máxima). Quando uma pessoa quer fazer alguma coisa, ela precisa pegar uma moeda do balde. Se não tem moeda disponível, ela não pode prosseguir.
+
+**Token bucket vs Leaky Bucket:** Token Bucket permite bursts (se o bucket está cheio, você pode consumir vários tokens rapidamente). Leaky Bucket Mantém taxa constante (como um funil que drena em velocidade fixa). Para APIs, Token Bucket é mais comum pois permite clientes fazer pequenos bursts sem punição.
+
+#### DSA Usada
+
+Por mais que tenha "bucket" no nome, a implementação não tem um balde como estrutura literal. O truque está em **rastrear estado em vez de elementos individuais:**
+
+```
+Estado do bucket:
+- tokens (int): quantos tokens existem agora
+- capacity (int): máximo de tokens permitidos
+- refillRate (int): tokens adicionados por intervalo
+- lastRefill (time.Time): quando foi o último reabastecimento
+```
+
+Quando alguém tenta consumir um token, primeiro deve calcular **quantos tokens deveriam ter sido adicionados desde lastRefill**, adiciona eles respeitando a capcidade, e atualiza lastRefill, e então tenta consumir.
+
+Isso é mais eficiente do que usar um timer, pois usa **lazy evaluation**, só calcula tokens quando precisam, não fica acordando goroutine a cada tick...
+
+### Libs Go Relavantes
+
+- sync.Mutex: Proteger leitura/escrita do estado do bucket
+- time.Time e time.Since(): Calcular quanto tempo passou desde último refill
+- time.Duration: Definir intervalos de refill (ex: 100ms)
+
+**NÃO precisa de**:
+
+- time.Ticker (abordagem mais simples usa lazy evaluation)
+- Channels (adiciona complexidade desnecessária aqui)
+
+### Trade-offs Principais
+
+**Precisão vs Performance**
+
+- Usar mutex para cada operação garante precisão mas pode criar contenção em alta carga
+- Usar atomic operations é mais rápido mas dificulta lógica de refill
+- Para este challenge, prefira clareza e correção (use mutex)
+
+**Lazy Refill vs Active Refill**
+
+- Lazy: calcula tokens na hora da requisição (mais simples, menos goroutines)
+- Active: goroutine em background usando ticker (mais preciso em cenários específicos)
+- Vamos usar Lazy porque é mais idiomático para este caso
+
+**Rejeitar vs bloquear**
+
+- Rejeitar imediatamente: retorna erro se não tem token
+- Bloquear e esperar: goroutine espera até token ficar disponível
+- Vamos implementar rejeição, pois bloquear complica testes e pode causar deadlocks.
+
+### Função main:
+
+```go
+package main
+
+import (
+	"fmt"
+	"sync"
+	"time"
+)
+
+// TokenBucket implementa rate limiting usando o algoritmo Token Bucket
+type TokenBucket struct {
+	// TODO: adicionar campos necessários
+	// Dica: você precisa rastrear:
+	// - quantos tokens existem agora
+	// - capacidade máxima
+	// - taxa de reabastecimento (tokens por intervalo)
+	// - intervalo de reabastecimento
+	// - timestamp do último refill
+	// - mutex para proteger acesso concorrente
+}
+
+// NewTokenBucket cria um novo rate limiter
+// capacity: número máximo de tokens no bucket
+// refillRate: quantos tokens adicionar por intervalo
+// refillInterval: com que frequência adicionar tokens (ex: 100ms)
+func NewTokenBucket(capacity int, refillRate int, refillInterval time.Duration) *TokenBucket {
+	// TODO: inicializar bucket começando cheio (todos os tokens disponíveis)
+	return nil
+}
+
+// Allow tenta consumir um token
+// Retorna true se conseguiu (requisição permitida)
+// Retorna false se não tem tokens disponíveis (requisição rejeitada)
+func (tb *TokenBucket) Allow() bool {
+	// TODO: implementar lógica
+	// Passos:
+	// 1. Lock do mutex
+	// 2. Calcular quantos tokens deveriam ter sido adicionados desde lastRefill
+	// 3. Adicionar esses tokens (respeitando capacidade máxima)
+	// 4. Atualizar lastRefill para agora
+	// 5. Tentar consumir 1 token
+	// 6. Unlock e retornar resultado
+	return false
+}
+
+// refill é um método helper para calcular e adicionar tokens
+// Retorna quantos tokens foram adicionados
+func (tb *TokenBucket) refill() int {
+	// TODO: implementar cálculo de refill
+	// Quanto tempo passou desde lastRefill?
+	// Quantos "intervalos" completos aconteceram nesse tempo?
+	// Quantos tokens isso representa?
+	// Não esqueça de respeitar a capacidade máxima!
+	return 0
+}
+
+// Stats retorna estatísticas atuais do bucket (útil para debugging)
+func (tb *TokenBucket) Stats() (available int, capacity int) {
+	// TODO: retornar tokens disponíveis e capacidade
+	// Precisa de lock? Por quê?
+	return 0, 0
+}
+
+func main() {
+	// Criar rate limiter: 10 tokens no máximo, adiciona 5 tokens a cada 100ms
+	// Isso dá ~50 requests/segundo no steady state
+	limiter := NewTokenBucket(10, 5, 100*time.Millisecond)
+
+	fmt.Println("Starting rate limiter test...")
+	fmt.Printf("Bucket: capacity=%d, refill rate=%d tokens per 100ms\n", 10, 5)
+	
+	// TODO: Simular múltiplas goroutines fazendo requests
+	// Dica: use WaitGroup, lance ~50 goroutines, cada uma tenta Allow()
+	// Conte quantas foram aceitas vs rejeitadas
+	// Print os resultados
+	
+	fmt.Println("Test completed!")
+}
+```
+
+### Testes
+
+```go
+package main
+
+import (
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func TestTokenBucket_InitialTokens(t *testing.T) {
+	// Bucket deve começar cheio
+	tb := NewTokenBucket(10, 5, 100*time.Millisecond)
+	
+	available, capacity := tb.Stats()
+	if available != capacity {
+		t.Errorf("expected bucket to start full: got %d/%d", available, capacity)
+	}
+}
+
+func TestTokenBucket_ConsumeAllTokens(t *testing.T) {
+	tb := NewTokenBucket(5, 1, 100*time.Millisecond)
+	
+	// Deve conseguir consumir exatamente 5 tokens
+	for i := 0; i < 5; i++ {
+		if !tb.Allow() {
+			t.Fatalf("expected token %d to be available", i+1)
+		}
+	}
+	
+	// Sexto deve falhar
+	if tb.Allow() {
+		t.Error("expected 6th request to be rejected")
+	}
+}
+
+func TestTokenBucket_Refill(t *testing.T) {
+	// Bucket pequeno: 5 tokens, adiciona 5 a cada 50ms
+	tb := NewTokenBucket(5, 5, 50*time.Millisecond)
+	
+	// Consumir todos
+	for i := 0; i < 5; i++ {
+		tb.Allow()
+	}
+	
+	// Verificar que está vazio
+	if tb.Allow() {
+		t.Error("bucket should be empty")
+	}
+	
+	// Esperar tempo suficiente para refill completo
+	time.Sleep(60 * time.Millisecond)
+	
+	// Deve ter 5 tokens novamente
+	allowed := 0
+	for i := 0; i < 10; i++ {
+		if tb.Allow() {
+			allowed++
+		}
+	}
+	
+	if allowed != 5 {
+		t.Errorf("expected 5 tokens after refill, got %d", allowed)
+	}
+}
+
+func TestTokenBucket_ConcurrentAccess(t *testing.T) {
+	tb := NewTokenBucket(100, 10, 50*time.Millisecond)
+	
+	var allowed atomic.Int32
+	var rejected atomic.Int32
+	
+	var wg sync.WaitGroup
+	// 200 goroutines competindo por 100 tokens
+	for i := 0; i < 200; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if tb.Allow() {
+				allowed.Add(1)
+			} else {
+				rejected.Add(1)
+			}
+		}()
+	}
+	
+	wg.Wait()
+	
+	total := int(allowed.Load()) + int(rejected.Load())
+	if total != 200 {
+		t.Errorf("expected 200 total requests, got %d", total)
+	}
+	
+	// Deve ter aceito aproximadamente 100 (pode variar um pouco por causa de refill)
+	if allowed.Load() < 95 || allowed.Load() > 105 {
+		t.Errorf("expected ~100 allowed, got %d", allowed.Load())
+	}
+}
+
+func TestTokenBucket_RateLimiting(t *testing.T) {
+	// 10 tokens, refill 10 a cada 100ms = 100 tokens/segundo
+	tb := NewTokenBucket(10, 10, 100*time.Millisecond)
+	
+	start := time.Now()
+	allowed := 0
+	
+	// Tentar consumir 50 tokens o mais rápido possível
+	for allowed < 50 {
+		if tb.Allow() {
+			allowed++
+		} else {
+			time.Sleep(10 * time.Millisecond) // Pequeno sleep para não criar busy loop
+		}
+	}
+	
+	elapsed := time.Since(start)
+	
+	// 50 tokens a 100/segundo deveria levar ~500ms
+	// Damos margem de erro (300ms a 700ms)
+	if elapsed < 300*time.Millisecond || elapsed > 700*time.Millisecond {
+		t.Errorf("expected ~500ms to get 50 tokens, took %v", elapsed)
+	}
+}
+
+// IMPORTANTE: Rode com go test -race
+func TestTokenBucket_RaceConditions(t *testing.T) {
+	tb := NewTokenBucket(50, 25, 50*time.Millisecond)
+	
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 10; j++ {
+				tb.Allow()
+				time.Sleep(5 * time.Millisecond)
+			}
+		}()
+	}
+	
+	wg.Wait()
 }
 ```
