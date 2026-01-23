@@ -1430,3 +1430,507 @@ func TestTokenBucket_RaceConditions(t *testing.T) {
 	wg.Wait()
 }
 ```
+
+## Worker Pool com Priority Quieu
+
+Você vai implementar um sistema de processamento de jobs com priorização thread-safe. Pensa em Sidekiq, Celery, ou qualquer background job processor que toda startup usa.
+
+Jobs não são todos iguais. Alguns são críticos (email de recuperação de senha), outros podem esperar (gerar relatório mensal). Você precisa garantir que jobs de alta prioridade sejam processados primeiro, mesmo que cheguem depois.
+
+### Por Que Este Challenge Importa
+
+Todo backend de verdade tem um job queue. Quando usuário faz "esqueci minha senha" no GitHub, esse job não pode esperar atrás de 10 mil jobs de "gerar relatório de commits". Priorização é crítica.
+
+Empresas que usam: Sidekiq (Ruby on Rails), Celery (Python/Django), Bull (Node.js), literalmente toda empresa que você está mirando (GitLab, Render, Tailscale). Em entrevistas, "design a task scheduler" ou "implement a job queue with priorities" são perguntas clássicas.
+
+O que você vai construir:
+
+Um worker pool onde múltiplos workers processam jobs de uma priority queue compartilhada. Jobs de maior prioridade (menor número) são processados primeiro. Múltiplos producers adicionando jobs simultaneamente, múltiplos workers consumindo. Tudo thread-safe.
+Os Desafios Principais
+1. Heap + Concorrência
+container/heap do Go não é thread-safe. Se múltiplas goroutines chamarem Push/Pop simultaneamente, a heap corrompe. Você precisa envolver com mutex, mas onde? Lock muito amplo mata performance. Lock insuficiente causa race conditions.
+2. Workers Bloqueando Eficientemente
+Workers precisam bloquear quando queue está vazia, mas acordar imediatamente quando job chegar ou shutdown acontecer. Não pode ficar em busy loop (desperdiça CPU). Não pode usar polling com sleep (adiciona latência). A solução é sync.Cond.
+3. Backpressure
+O que acontece quando jobs chegam mais rápido que workers conseguem processar? Queue cresce infinitamente até matar o processo por falta de memória. Você precisa decidir: bloquear producers (backpressure), dropar jobs (perder dados), ou deixar unbounded (risco de OOM).
+Background Técnico
+Min Heap para Priority Queue
+Uma heap é árvore binária onde cada nó é menor (ou maior) que seus filhos. container/heap do Go implementa min-heap: menor elemento sempre no topo.
+Para priority queue onde menor priority number = maior prioridade, min-heap é perfeito. Job com priority 0 (Critical) vem antes de priority 3 (Low).
+Interface heap.Interface exige:
+
+Len(), Less(), Swap(): para ordenação
+Push(x), Pop(): para adicionar/remover
+
+IMPORTANTE: Você sempre chama heap.Push(h, item) (função do package), nunca h.Push(item) diretamente. O package gerencia invariantes da heap.
+Complexidade: Push e Pop são O(log n). Muito mais eficiente que manter slice ordenado (O(n) para inserção).
+sync.Cond para Coordenação
+Você já usou sync.Cond no TCP Chat Server. É exatamente o mesmo pattern aqui.
+Workers chamam cond.Wait() quando queue vazia (bloqueia). Quando Enqueue adiciona job, chama cond.Signal() (acorda um worker). Quando Shutdown, chama cond.Broadcast() (acorda todos).
+Regra de ouro: cond.Wait() SEMPRE dentro de um loop que verifica condição, SEMPRE com lock do mutex associado.
+Backpressure Strategies
+Unbounded Queue: Queue cresce infinitamente. Nunca perde jobs, mas pode matar processo por falta de memória.
+Bounded + Bloqueio: Queue tem tamanho máximo. Quando cheia, Enqueue bloqueia até ter espaço. Aplica backpressure nos producers.
+Bounded + Drop: Queue tem máximo. Quando cheia, Enqueue retorna erro e incrementa contador de dropped. Producer decide o que fazer.
+Não tem resposta certa universal. Sidekiq usa bounded + bloqueio. Kafka deixa producer escolher. Para este challenge, vamos fazer bounded + drop (mais simples).
+Libs Go Relevantes
+Precisa:
+
+container/heap: implementação de heap
+sync.Mutex: proteger acesso à heap
+sync.Cond: coordenar workers
+sync.WaitGroup: esperar workers em shutdown
+
+Trade-offs:
+Precisão vs Performance: Lock em toda operação garante correção mas pode criar contenção. Para este challenge, prefira correção (use mutex).
+Drain vs Cancel em Shutdown: Quando shutdown acontece, você drena queue (processa jobs restantes) ou cancela tudo? Vamos drenar, mas só jobs já enfileirados.
+Como Começar
+Passo 1: Implementar JobHeap (15 min)
+Comece com a heap isolada, sem concorrência. Implemente os 5 métodos de heap.Interface. Rode teste básico até passar.
+Dica: em Less(), menor priority number vem primeiro. Se empate, pode desempatar por ID.
+Passo 2: PriorityQueue Thread-Safe (20 min)
+Envolva heap com mutex e cond. Campos: heap, mutex, cond, shutdown flag, métricas.
+Dequeue() é o mais interessante: loop com cond.Wait() enquanto queue vazia E não está em shutdown. Quando sair do loop, verificar se é porque tem job ou porque shutdown aconteceu.
+Passo 3: WorkerPool (15 min)
+Com queue funcionando, pool é simples. Cada worker é loop: Dequeue -> Processa -> Repete. Use WaitGroup para coordenar shutdown.
+Passo 4: Testar com Race Detector (10 min)
+Rode go test -race -v. O teste TestPriorityOrdering é crítico: verifica que jobs são processados por prioridade. Se passar com -race, está correto.
+
+Decisões de Implementação
+1. Bounded ou Unbounded?
+Comece bounded. É mais seguro e força você a pensar em backpressure. maxSize como parâmetro do construtor.
+2. Como Acordar Workers?
+Em Enqueue(): depois de Push, chame cond.Signal() (acorda um worker).
+Em Shutdown(): depois de setar flag, chame cond.Broadcast() (acorda todos).
+3. Métricas?
+Adicione campos int para enqueued, processed, dropped. Útil para debugging e produção real.
+
+```
+package main
+
+import (
+	"container/heap"
+	"fmt"
+	"sync"
+	"time"
+)
+
+/*
+TODO - PASSOS PARA IMPLEMENTAR WORKER POOL COM PRIORITY QUEUE
+
+1. IMPLEMENTAR JobHeap COM heap.Interface
+   - Len(), Less(), Swap() para ordenação
+   - Push() e Pop() para container/heap
+   - Menor priority number = maior prioridade (vem primeiro)
+
+2. CRIAR PriorityQueue THREAD-SAFE
+   - Envolver JobHeap com mutex
+   - Usar sync.Cond para acordar workers quando job chegar
+   - Implementar Enqueue (adiciona job, sinaliza workers)
+   - Implementar Dequeue (bloqueia se vazio, acorda em shutdown)
+
+3. IMPLEMENTAR WorkerPool
+   - Criar N workers em goroutines
+   - Cada worker loop: Dequeue -> Processa -> Repete
+   - WaitGroup para coordenar shutdown
+   
+4. GRACEFUL SHUTDOWN
+   - Parar de aceitar novos jobs
+   - Broadcast para acordar todos os workers bloqueados
+   - Esperar workers terminarem jobs atuais
+*/
+func main() {
+	fmt.Println("=== Worker Pool com Priority Queue ===\n")
+
+	processor := func(job *Job) error {
+		priorityName := map[int]string{
+			PriorityCritical: "CRITICAL",
+			PriorityHigh:     "HIGH",
+			PriorityNormal:   "NORMAL",
+			PriorityLow:      "LOW",
+		}
+		fmt.Printf("[Worker] Processing job %d [%s]: %s\n",
+			job.ID, priorityName[job.Priority], job.Payload)
+		time.Sleep(100 * time.Millisecond)
+		return nil
+	}
+
+	pool := NewWorkerPool(3, 10, processor)
+	pool.Start()
+
+	jobs := []*Job{
+		{ID: 1, Priority: PriorityNormal, Payload: "Send newsletter"},
+		{ID: 2, Priority: PriorityCritical, Payload: "Password reset email"},
+		{ID: 3, Priority: PriorityLow, Payload: "Cleanup old logs"},
+		{ID: 4, Priority: PriorityHigh, Payload: "Welcome email"},
+		{ID: 5, Priority: PriorityCritical, Payload: "Payment confirmation"},
+		{ID: 6, Priority: PriorityNormal, Payload: "Weekly report"},
+		{ID: 7, Priority: PriorityLow, Payload: "Aggregate metrics"},
+		{ID: 8, Priority: PriorityHigh, Payload: "Push notification"},
+	}
+
+	fmt.Println("Submitting jobs...")
+	for _, job := range jobs {
+		if err := pool.Submit(job); err != nil {
+			fmt.Printf("Failed to submit job %d: %v\n", job.ID, err)
+		}
+	}
+
+	time.Sleep(2 * time.Second)
+
+	enq, proc, drop, qs := pool.Stats()
+	fmt.Printf("\n=== Stats ===\n")
+	fmt.Printf("Enqueued: %d, Processed: %d, Dropped: %d, Queue Size: %d\n", enq, proc, drop, qs)
+
+	fmt.Println("\nShutting down...")
+	pool.Shutdown()
+	fmt.Println("All workers stopped. Done!")
+}
+
+const (
+	PriorityCritical = 0 // Password reset, payment confirmation
+	PriorityHigh     = 1 // Welcome emails, notifications
+	PriorityNormal   = 2 // Newsletter, analytics
+	PriorityLow      = 3 // Cleanup tasks, logs aggregation
+)
+
+type Job struct {
+	ID       int
+	Priority int
+	Payload  string
+}
+
+type JobHeap []*Job
+
+func (h JobHeap) Len() int { return len(h) }
+
+func (h JobHeap) Less(i, j int) bool {
+	return h[i].Priority < h[j].Priority
+}
+
+func (h JobHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+}
+
+func (h *JobHeap) Push(x any) {
+	*h = append(*h, x.(*Job))
+}
+
+func (h *JobHeap) Pop() any {
+	old := *h
+	n := len(old)
+	job := old[n-1]
+	*h = old[:n-1]
+	return job
+}
+
+type PriorityQueue struct {
+	heap           *JobHeap
+	maxSize        int
+	mu             sync.Mutex
+	cond           *sync.Cond
+	isShuttingDown bool
+	enqueued       int
+	processed      int
+	dropped        int
+}
+
+func NewPriorityQueue(maxSize int) *PriorityQueue {
+	pq := &PriorityQueue{
+		heap:    &JobHeap{},
+		maxSize: maxSize,
+	}
+	heap.Init(pq.heap)
+	pq.cond = sync.NewCond(&pq.mu)
+	return pq
+}
+
+func (pq *PriorityQueue) Enqueue(job *Job) error {
+	pq.mu.Lock()
+	defer pq.mu.Unlock()
+
+	if pq.isShuttingDown {
+		return fmt.Errorf("shutting down")
+	}
+
+	if pq.maxSize > 0 && pq.heap.Len() >= pq.maxSize {
+		pq.dropped++
+		return fmt.Errorf("queue full")
+	}
+
+	heap.Push(pq.heap, job)
+	pq.enqueued++
+	pq.cond.Signal()
+	return nil
+}
+
+func (pq *PriorityQueue) Dequeue() (*Job, bool) {
+	pq.mu.Lock()
+	defer pq.mu.Unlock()
+
+	for pq.heap.Len() == 0 && !pq.isShuttingDown {
+		pq.cond.Wait()
+	}
+
+	if pq.isShuttingDown && pq.heap.Len() == 0 {
+		return nil, false
+	}
+
+	job := heap.Pop(pq.heap).(*Job)
+	pq.processed++
+	return job, true
+}
+
+func (pq *PriorityQueue) Shutdown() {
+	pq.mu.Lock()
+	defer pq.mu.Unlock()
+	pq.isShuttingDown = true
+	pq.cond.Broadcast()
+}
+
+func (pq *PriorityQueue) Stats() (enqueued, processed, dropped, queueSize int) {
+	pq.mu.Lock()
+	defer pq.mu.Unlock()
+	return pq.enqueued, pq.processed, pq.dropped, pq.heap.Len()
+}
+
+type WorkerPool struct {
+	queue       *PriorityQueue
+	numWorkers  int
+	processFunc func(*Job) error
+	wg          sync.WaitGroup
+}
+
+func NewWorkerPool(numWorkers, queueSize int, processor func(*Job) error) *WorkerPool {
+	return &WorkerPool{
+		queue:       NewPriorityQueue(queueSize),
+		numWorkers:  numWorkers,
+		processFunc: processor,
+	}
+}
+
+func (wp *WorkerPool) Start() {
+	for i := 0; i < wp.numWorkers; i++ {
+		wp.wg.Add(1)
+		go wp.worker(i)
+	}
+}
+
+func (wp *WorkerPool) worker(id int) {
+	defer wp.wg.Done()
+	for {
+		job, ok := wp.queue.Dequeue()
+		if !ok {
+			return
+		}
+		if err := wp.processFunc(job); err != nil {
+			fmt.Printf("Worker %d error processing job %d: %v\n", id, job.ID, err)
+		}
+	}
+}
+
+func (wp *WorkerPool) Submit(job *Job) error {
+	return wp.queue.Enqueue(job)
+}
+
+func (wp *WorkerPool) Shutdown() {
+	wp.queue.Shutdown()
+	wp.wg.Wait()
+}
+
+func (wp *WorkerPool) Stats() (enqueued, processed, dropped, queueSize int) {
+	return wp.queue.Stats()
+}
+
+```
+testes:
+
+```
+package main
+
+import (
+	"container/heap"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// TestJobHeapBasic testa operações básicas da heap
+func TestJobHeapBasic(t *testing.T) {
+	h := &JobHeap{}
+	heap.Init(h)
+
+	jobs := []*Job{
+		{ID: 1, Priority: PriorityNormal},
+		{ID: 2, Priority: PriorityCritical},
+		{ID: 3, Priority: PriorityLow},
+		{ID: 4, Priority: PriorityHigh},
+	}
+
+	// Push jobs
+	for _, job := range jobs {
+		heap.Push(h, job)
+	}
+
+	// Pop deve retornar em ordem de prioridade
+	expected := []int{PriorityCritical, PriorityHigh, PriorityNormal, PriorityLow}
+	for i, exp := range expected {
+		job := heap.Pop(h).(*Job)
+		if job.Priority != exp {
+			t.Errorf("Pop %d: expected priority %d, got %d", i, exp, job.Priority)
+		}
+	}
+}
+
+// TestPriorityQueueThreadSafety testa acesso concorrente
+func TestPriorityQueueThreadSafety(t *testing.T) {
+	pq := NewPriorityQueue(100)
+
+	var wg sync.WaitGroup
+	numProducers := 10
+	numConsumers := 5
+	jobsPerProducer := 20
+
+	// Producers
+	for i := 0; i < numProducers; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < jobsPerProducer; j++ {
+				job := &Job{
+					ID:       id*jobsPerProducer + j,
+					Priority: j % 4, // Variar prioridades
+					Payload:  "test",
+				}
+				pq.Enqueue(job)
+			}
+		}(i)
+	}
+
+	// Consumers
+	consumed := int32(0)
+	for i := 0; i < numConsumers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				job, ok := pq.Dequeue()
+				if !ok {
+					return
+				}
+				if job != nil {
+					atomic.AddInt32(&consumed, 1)
+				}
+			}
+		}()
+	}
+
+	// Esperar producers terminarem
+	time.Sleep(100 * time.Millisecond)
+
+	// Shutdown
+	pq.Shutdown()
+	wg.Wait()
+
+	expected := int32(numProducers * jobsPerProducer)
+	if consumed != expected {
+		t.Errorf("Expected %d jobs consumed, got %d", expected, consumed)
+	}
+}
+
+// TestBoundedQueue testa comportamento quando queue enche
+func TestBoundedQueue(t *testing.T) {
+	maxSize := 5
+	pq := NewPriorityQueue(maxSize)
+
+	// Encher queue
+	for i := 0; i < maxSize; i++ {
+		err := pq.Enqueue(&Job{ID: i, Priority: PriorityNormal})
+		if err != nil {
+			t.Fatalf("Failed to enqueue job %d: %v", i, err)
+		}
+	}
+
+	// Próximo enqueue deve falhar ou bloquear dependendo da implementação
+	err := pq.Enqueue(&Job{ID: 999, Priority: PriorityCritical})
+	if err == nil && pq.Len() > maxSize {
+		t.Error("Queue exceeded max size without error")
+	}
+}
+
+// TestWorkerPoolProcessing testa que workers processam jobs
+func TestWorkerPoolProcessing(t *testing.T) {
+	processed := int32(0)
+	processor := func(job *Job) error {
+		atomic.AddInt32(&processed, 1)
+		time.Sleep(10 * time.Millisecond)
+		return nil
+	}
+
+	pool := NewWorkerPool(3, 20, processor)
+	pool.Start()
+
+	// Submit jobs
+	numJobs := 15
+	for i := 0; i < numJobs; i++ {
+		pool.Submit(&Job{
+			ID:       i,
+			Priority: i % 4,
+			Payload:  "test",
+		})
+	}
+
+	// Esperar processar
+	time.Sleep(500 * time.Millisecond)
+	pool.Shutdown()
+
+	if processed != int32(numJobs) {
+		t.Errorf("Expected %d jobs processed, got %d", numJobs, processed)
+	}
+}
+
+// TestPriorityOrdering testa que jobs de alta prioridade são processados primeiro
+func TestPriorityOrdering(t *testing.T) {
+	var mu sync.Mutex
+	var processOrder []int
+
+	processor := func(job *Job) error {
+		mu.Lock()
+		processOrder = append(processOrder, job.ID)
+		mu.Unlock()
+		time.Sleep(50 * time.Millisecond)
+		return nil
+	}
+
+	pool := NewWorkerPool(1, 10, processor) // 1 worker para ordem determinística
+	pool.Start()
+
+	// Submit em ordem aleatória mas IDs baixos = prioridade alta
+	jobs := []*Job{
+		{ID: 3, Priority: PriorityLow},
+		{ID: 1, Priority: PriorityCritical},
+		{ID: 4, Priority: PriorityLow},
+		{ID: 2, Priority: PriorityHigh},
+	}
+
+	for _, job := range jobs {
+		pool.Submit(job)
+	}
+
+	time.Sleep(500 * time.Millisecond)
+	pool.Shutdown()
+
+	// Verificar que processou em ordem de prioridade
+	if len(processOrder) != 4 {
+		t.Fatalf("Expected 4 jobs processed, got %d", len(processOrder))
+	}
+
+	// ID 1 (Critical) deve vir antes de ID 2 (High)
+	// ID 2 (High) deve vir antes de IDs 3,4 (Low)
+	if processOrder[0] != 1 || processOrder[1] != 2 {
+		t.Errorf("Wrong processing order: %v", processOrder)
+	}
+}
+
+```
