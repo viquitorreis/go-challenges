@@ -1934,3 +1934,579 @@ func TestPriorityOrdering(t *testing.T) {
 }
 
 ```
+
+
+---
+
+## LRU Cache Thread-Safe com TTL
+
+Você vai implementar um cache completo de produção com política de eviction LRU (Least Recently Used) e expiração automática por TTL (Time To Live). Este é o tipo de sistema que está rodando em todo lugar.
+
+Cache com eviction está em tudo. Redis usa LRU. Memcached usa LRU. Browsers usam LRU para cache de assets. CDNs usam variações de LRU. Quando você acessa reddit.com, tem múltiplas camadas de cache usando políticas parecidas.
+
+## Por Que Este Challenge Importa
+
+Todo sistema de verdade usa cache. API lenta? Adiciona cache. Database sobrecarregado? Cache. Latência internacional alta? CDN com cache. LRU é a política de eviction mais comum e mais perguntada em entrevistas.
+
+**Empresas que usam:** Redis (open source e cloud), Memcached, CloudFlare (CDN), praticamente toda API de grande empresa em produção. Em entrevistas FAANG e tier 2/3, "implement an LRU cache" é pergunta clássica. Adicionar TTL e thread safety te eleva para nível senior.
+
+**O que você vai construir:**
+
+Um cache que mantém até N items em memória. Quando você acessa um item (Get), ele se torna o "mais recentemente usado". Quando o cache enche e você adiciona novo item, o "menos recentemente usado" é removido (evicted). Items também expiram automaticamente após TTL.
+
+Múltiplas goroutines vão ler e escrever simultaneamente. Você precisa garantir thread safety sem matar performance. Uma goroutine em background vai limpar items expirados periodicamente.
+
+## Os Desafios Principais
+
+**1. Estrutura de Dados Eficiente**
+
+Precisa de O(1) para Get, Set, e eviction. Isso exige **HashMap + Doubly Linked List**. HashMap dá O(1) lookup. Linked list dá O(1) para mover items e remover do final. Slice não funciona porque remover do meio é O(n).
+
+Você precisa entender ponteiros. Cada node tem prev e next. Quando move item para frente, precisa atualizar 4 ponteiros (prev.next, next.prev, node.prev, node.next). Um erro aqui e você vaza memória ou corrompe a lista.
+
+**2. Concorrência Sem Matar Performance**
+
+Solução ingênua: mutex global. Todo Get bloqueia todo Set. Com 100 goroutines lendo, apenas uma processa por vez. Performance horrível.
+
+Solução melhor: RWMutex. Múltiplas leituras simultâneas, apenas writes bloqueiam tudo. Mas Get também escreve (move node na lista), então ainda tem contenção.
+
+Solução avançada (se sobrar tempo): sharding. Múltiplos caches menores, cada um com próprio lock. Hash da key determina qual shard. Reduz contenção drasticamente.
+
+**3. TTL Cleanup Coordenado**
+
+Items expiram após TTL. Você não pode verificar em todo Get se expirou (adiciona latência). Precisa de goroutine em background que periodicamente varre e remove expirados.
+
+Mas cleanup goroutine precisa coordenar com Gets/Sets. Se cleanup está varrendo lista e alguém chama Set, pode corromper. Precisa do mesmo lock. Como fazer cleanup não travar cache inteiro por muito tempo?
+
+## Background Técnico
+
+### HashMap + Doubly Linked List
+
+```
+HashMap: key -> *Node  (O(1) lookup)
+
+Doubly Linked List: (ordem de uso, mais recente na frente)
+head -> [Node A] <-> [Node B] <-> [Node C] <- tail
+         (newest)                  (oldest/LRU)
+```
+
+#### Get "B":
+
+1. Lookup no map: O(1)
+2. Move B para head: O(1) (atualizar ponteiros)
+3. Retorna value
+
+#### Set novo item quando cheio:
+
+1. Remove tail (LRU): O(1)
+2. Delete do map: O(1)
+3. Cria novo node na head: O(1)
+4. Adiciona no map: O(1)
+
+Tudo O(1). Por isso HashMap + Linked List e não outras estruturas.
+
+#### Por Que Doubly Linked List?
+
+Singly linked list não funciona porque para remover node, você precisa do anterior (para atualizar seu next). Com doubly, cada node sabe seu prev, então remoção é O(1).
+
+#### TTL e Cleanup
+
+Opção 1 - Lazy expiration: Só verifica TTL em Get. Simples mas items expirados ocupam memória até serem acessados.
+Opção 2 - Active expiration: Goroutine periodicamente varre e remove expirados. Mais complexo mas libera memória.
+
+Vamos fazer opção 2. Ticker rodando a cada X segundos, varre lista do final (items mais antigos), remove expirados, para quando encontrar item válido (otimização: lista está ordenada por tempo de acesso).
+
+#### Thread Safety com RWMutex
+
+```go
+type LRUCache struct {
+    mu sync.RWMutex  // Read-Write mutex
+}
+
+func (c *LRUCache) Get(key string) (any, bool) {
+    c.mu.Lock()    // Precisa write lock (move node)
+    defer c.mu.Unlock()
+    // ...
+}
+
+func (c *LRUCache) Size() int {
+    c.mu.RLock()   // Read lock suficiente
+    defer c.mu.RUnlock()
+    return len(c.items)
+}
+```
+
+### Trade-offs Principais
+
+#### Mutex vs RWMutex vs Sharding
+
+Mutex é simples, funciona, mas serializa tudo.
+RWMutex: permite múltiplas leituras mas Get ainda precisa write lock.
+Sharding: melhor performance mas é mais complexo.
+
+Para este challenge use Mutex, que é mais simples.
+
+Se a performance for um problema, o sharding pode ser um pŕoximo passo.
+
+#### Lazy vs Active TTL Cleanup
+
+Lazy: verifica o TTL e limpa durante o Get, é simples.
+Active: goroutine em background, mais eficiente em memória pois evita itens muito antigos.
+
+Para esse challenge, use o Active prioritariamente, e também se conseguir o Lazy, obtendo uma solução híbrida.
+
+#### Frequência de cleanup
+
+Se a frequencia for alta, vai ter overhead de lock, Se pouco frequente, os itens expirados ocupam mais memória do que deveria.
+
+Use um intervalo de 100ms.
+
+### Passos
+
+**Passo 1**: Doubly Linked List (30 min)
+
+Implemente a lista primeiro, sem cache. Struct Node com key, value, timestamp, prev, next. Métodos: addToFront, remove, moveToFront. Teste que ponteiros estão corretos.
+
+Dica: desenhe no papel. Quando move node do meio para frente, você precisa:
+
+Conectar prev e next entre si (pular o node)
+Colocar node como novo head
+Atualizar head.prev para apontar para node
+
+**Passo 2**: Cache Básico sem TTL (30 min)
+
+Adicione HashMap + Linked List. Implemente Get e Set com eviction LRU. Ignore TTL por enquanto. Adicione mutex para thread safety.
+
+**Passo 3**: Adicionar TTL (20 min)
+
+Adicione campo timestamp em cada node. Em Get, verifique se expirou. Se expirou, remova e retorne miss. Em Set, sempre atualize timestamp para time.Now().
+
+**Passo 4**: Cleanup Goroutine (20 min)
+
+Inicie goroutine em NewLRUCache. Use time.NewTicker. A cada tick, varra lista do tail (mais antigos primeiro). Remova items expirados. Para quando encontrar item válido (otimização).
+
+**Passo 5**: Graceful Shutdown (10 min)
+
+Adicione Close() que sinaliza cleanup goroutine para parar. Use channel ou context.
+
+**Passo 6**: Testes com Race Detector (10 min)
+
+Rode go test -race -v. Teste TestLRUCache_Concurrent e TestLRUCache_Race são críticos.
+
+```go
+package main
+
+import (
+	"fmt"
+	"sync"
+	"time"
+)
+
+/*
+TODO - PASSOS PARA IMPLEMENTAR LRU CACHE COM TTL
+
+1. CRIAR A DOUBLY LINKED LIST
+   - Node com ponteiros para prev e next
+   - Métodos: addToFront, remove, moveToFront
+   - Manter ponteiros head e tail atualizados
+
+2. CRIAR O CACHE
+   - HashMap (map) para O(1) lookup: key -> node
+   - Linked list para rastrear ordem de uso
+   - Fields: capacity, size, mutex
+
+3. IMPLEMENTAR Get()
+   - Verificar se key existe no map
+   - Verificar se expirou (comparar timestamp com TTL)
+   - Se válido: mover node para frente da lista, retornar valor
+   - Se expirado: remover do cache, retornar miss
+
+4. IMPLEMENTAR Set()
+   - Se key já existe: atualizar valor, mover para frente, atualizar timestamp
+   - Se não existe: criar node, adicionar no map e na frente da lista
+   - Se cache cheio: remover node do final da lista antes de adicionar novo
+   - Sempre atualizar timestamp com time.Now()
+
+5. IMPLEMENTAR CLEANUP AUTOMÁTICO
+   - Goroutine em background roda periodicamente
+   - Varre lista do final (itens mais antigos)
+   - Remove itens expirados
+   - Para quando encontrar item não expirado (otimização)
+
+6. GRACEFUL SHUTDOWN
+   - Sinalizar cleanup goroutine para parar
+   - Esperar goroutine terminar
+*/
+
+func main() {
+	fmt.Println("=== LRU Cache com TTL ===")
+
+	// Cache: max 5 items, TTL de 2 segundos
+	cache := NewLRUCache(5, 2*time.Second)
+	defer cache.Close()
+
+	// Adicionar alguns items
+	fmt.Println("Adding items...")
+	cache.Set("user:1", "Alice")
+	cache.Set("user:2", "Bob")
+	cache.Set("user:3", "Charlie")
+	cache.Set("user:4", "Diana")
+	cache.Set("user:5", "Eve")
+
+	// Tentar get
+	if val, ok := cache.Get("user:1"); ok {
+		fmt.Printf("Got user:1 = %v\n", val)
+	}
+
+	// Adicionar 6º item (deve evict LRU)
+	fmt.Println("\nAdding 6th item (cache full, should evict LRU)...")
+	cache.Set("user:6", "Frank")
+
+	// user:2 deve ter sido evicted (era o LRU, user:1 foi acessado)
+	if _, ok := cache.Get("user:2"); !ok {
+		fmt.Println("user:2 was evicted (LRU)")
+	}
+
+	// Testar TTL
+	fmt.Println("\nWaiting for TTL expiration (2.5s)...")
+	time.Sleep(2500 * time.Millisecond)
+
+	// Todos os items devem ter expirado
+	if _, ok := cache.Get("user:1"); !ok {
+		fmt.Println("user:1 expired (TTL)")
+	}
+
+	// Adicionar novos items
+	cache.Set("user:7", "Grace")
+	cache.Set("user:8", "Henry")
+
+	fmt.Printf("\nFinal cache size: %d\n", cache.Size())
+	fmt.Println("Done!")
+}
+
+// CacheItem representa um item no cache
+type CacheItem struct {
+	key       string
+	value     any
+	timestamp time.Time
+	// TODO: adicionar ponteiros prev e next para doubly linked list
+}
+
+// LRUCache é um cache thread-safe com política LRU e TTL
+type LRUCache struct {
+	// TODO: adicionar campos necessários
+	// - capacity (max items)
+	// - map[string]*CacheItem para O(1) lookup
+	// - head e tail da linked list
+	// - mutex para thread safety
+	// - ttl (time to live)
+	// - channel para shutdown do cleanup
+}
+
+// NewLRUCache cria novo cache
+// capacity: número máximo de items
+// ttl: quanto tempo items vivem antes de expirar
+func NewLRUCache(capacity int, ttl time.Duration) *LRUCache {
+	// TODO: implementar
+	// Inicializar map, linked list vazia (head/tail nil)
+	// Iniciar goroutine de cleanup
+	return nil
+}
+
+// Get busca valor por key
+// Retorna (value, true) se encontrou e não expirou
+// Retorna (nil, false) se não encontrou ou expirou
+func (c *LRUCache) Get(key string) (any, bool) {
+	// TODO: implementar
+	// 1. Lock mutex
+	// 2. Verificar se key existe no map
+	// 3. Verificar se expirou (time.Since(timestamp) > ttl)
+	// 4. Se expirou: remover do cache, retornar false
+	// 5. Se válido: mover para frente da lista, retornar value
+	// 6. Unlock mutex
+	return nil, false
+}
+
+// Set adiciona ou atualiza item no cache
+func (c *LRUCache) Set(key string, value any) {
+	// TODO: implementar
+	// 1. Lock mutex
+	// 2. Se key já existe: atualizar valor, mover para frente, atualizar timestamp
+	// 3. Se não existe:
+	//    a. Se cache cheio: remover item do final (LRU)
+	//    b. Criar novo node
+	//    c. Adicionar no map e na frente da lista
+	//    d. Atualizar timestamp
+	// 4. Unlock mutex
+}
+
+// Delete remove item do cache
+func (c *LRUCache) Delete(key string) {
+	// TODO: implementar
+	// Lock, remover do map e da lista, unlock
+}
+
+// Size retorna número de items no cache
+func (c *LRUCache) Size() int {
+	// TODO: implementar com lock
+	return 0
+}
+
+// addToFront adiciona node no início da lista
+func (c *LRUCache) addToFront(node *CacheItem) {
+	// TODO: implementar
+	// Atualizar ponteiros head/tail
+}
+
+// remove retira node da lista
+func (c *LRUCache) remove(node *CacheItem) {
+	// TODO: implementar
+	// Atualizar ponteiros dos vizinhos e head/tail se necessário
+}
+
+// moveToFront move node existente para início
+func (c *LRUCache) moveToFront(node *CacheItem) {
+	// TODO: implementar
+	// Remover da posição atual e adicionar na frente
+}
+
+// removeLRU remove item menos recentemente usado (final da lista)
+func (c *LRUCache) removeLRU() {
+	// TODO: implementar
+	// Remover tail, atualizar map
+}
+
+// cleanup goroutine que remove items expirados periodicamente
+func (c *LRUCache) cleanup() {
+	// TODO: implementar
+	// ticker := time.NewTicker(interval)
+	// Loop: a cada tick, varrer lista do final
+	// Remover items expirados
+	// Parar quando receber sinal de shutdown
+}
+
+// Close para cleanup goroutine
+func (c *LRUCache) Close() {
+	// TODO: implementar
+	// Enviar sinal para shutdown channel
+}
+```
+
+Testes:
+
+```go
+package main
+
+import (
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func TestLRUCache_BasicOperations(t *testing.T) {
+	cache := NewLRUCache(3, 10*time.Second)
+	defer cache.Close()
+
+	cache.Set("a", 1)
+	cache.Set("b", 2)
+	cache.Set("c", 3)
+
+	if val, ok := cache.Get("a"); !ok || val != 1 {
+		t.Errorf("expected a=1, got %v, %v", val, ok)
+	}
+
+	if cache.Size() != 3 {
+		t.Errorf("expected size 3, got %d", cache.Size())
+	}
+}
+
+func TestLRUCache_Eviction(t *testing.T) {
+	cache := NewLRUCache(3, 10*time.Second)
+	defer cache.Close()
+
+	cache.Set("a", 1)
+	cache.Set("b", 2)
+	cache.Set("c", 3)
+
+	// a é o LRU
+	// Adicionar d deve evict a
+	cache.Set("d", 4)
+
+	if _, ok := cache.Get("a"); ok {
+		t.Error("a should have been evicted")
+	}
+
+	if cache.Size() != 3 {
+		t.Errorf("expected size 3, got %d", cache.Size())
+	}
+}
+
+func TestLRUCache_LRUOrdering(t *testing.T) {
+	cache := NewLRUCache(3, 10*time.Second)
+	defer cache.Close()
+
+	cache.Set("a", 1)
+	cache.Set("b", 2)
+	cache.Set("c", 3)
+
+	// Acessar a (move para frente)
+	cache.Get("a")
+
+	// Agora b é o LRU
+	cache.Set("d", 4)
+
+	// b deve ter sido evicted
+	if _, ok := cache.Get("b"); ok {
+		t.Error("b should have been evicted")
+	}
+
+	// a ainda deve existir
+	if _, ok := cache.Get("a"); !ok {
+		t.Error("a should still exist")
+	}
+}
+
+func TestLRUCache_Update(t *testing.T) {
+	cache := NewLRUCache(3, 10*time.Second)
+	defer cache.Close()
+
+	cache.Set("a", 1)
+	cache.Set("a", 2) // update
+
+	if val, ok := cache.Get("a"); !ok || val != 2 {
+		t.Errorf("expected a=2 after update, got %v", val)
+	}
+
+	if cache.Size() != 1 {
+		t.Errorf("expected size 1, got %d", cache.Size())
+	}
+}
+
+func TestLRUCache_TTL(t *testing.T) {
+	cache := NewLRUCache(10, 100*time.Millisecond)
+	defer cache.Close()
+
+	cache.Set("a", 1)
+
+	// Dentro do TTL
+	if _, ok := cache.Get("a"); !ok {
+		t.Error("a should exist within TTL")
+	}
+
+	// Esperar expirar
+	time.Sleep(150 * time.Millisecond)
+
+	// Deve ter expirado
+	if _, ok := cache.Get("a"); ok {
+		t.Error("a should have expired")
+	}
+}
+
+func TestLRUCache_TTLRefresh(t *testing.T) {
+	cache := NewLRUCache(10, 100*time.Millisecond)
+	defer cache.Close()
+
+	cache.Set("a", 1)
+	time.Sleep(60 * time.Millisecond)
+
+	// Atualizar (refresh TTL)
+	cache.Set("a", 2)
+	time.Sleep(60 * time.Millisecond)
+
+	// Não deve ter expirado (TTL foi refreshed)
+	if val, ok := cache.Get("a"); !ok || val != 2 {
+		t.Error("a should still exist after TTL refresh")
+	}
+}
+
+func TestLRUCache_Concurrent(t *testing.T) {
+	cache := NewLRUCache(100, 5*time.Second)
+	defer cache.Close()
+
+	var wg sync.WaitGroup
+	numGoroutines := 50
+
+	// Writers
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				key := fmt.Sprintf("key:%d:%d", id, j)
+				cache.Set(key, j)
+			}
+		}(i)
+	}
+
+	// Readers
+	var hits, misses atomic.Int32
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				key := fmt.Sprintf("key:%d:%d", id, j)
+				if _, ok := cache.Get(key); ok {
+					hits.Add(1)
+				} else {
+					misses.Add(1)
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	totalOps := int(hits.Load()) + int(misses.Load())
+	if totalOps != numGoroutines*100 {
+		t.Errorf("expected %d total ops, got %d", numGoroutines*100, totalOps)
+	}
+}
+
+func TestLRUCache_CleanupExpired(t *testing.T) {
+	cache := NewLRUCache(10, 50*time.Millisecond)
+	defer cache.Close()
+
+	// Adicionar items
+	for i := 0; i < 5; i++ {
+		cache.Set(fmt.Sprintf("key:%d", i), i)
+	}
+
+	if cache.Size() != 5 {
+		t.Errorf("expected size 5, got %d", cache.Size())
+	}
+
+	// Esperar cleanup remover items expirados
+	time.Sleep(200 * time.Millisecond)
+
+	// Cache deve estar vazio ou quase
+	size := cache.Size()
+	if size > 1 { // Pode ter 0 ou 1 dependendo de timing
+		t.Errorf("expected size ~0 after cleanup, got %d", size)
+	}
+}
+
+// CRÍTICO: rodar com -race
+func TestLRUCache_Race(t *testing.T) {
+	cache := NewLRUCache(50, 1*time.Second)
+	defer cache.Close()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				key := fmt.Sprintf("k:%d", j)
+				cache.Set(key, j)
+				cache.Get(key)
+				if j%10 == 0 {
+					cache.Delete(key)
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+```
