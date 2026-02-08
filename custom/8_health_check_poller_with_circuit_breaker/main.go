@@ -217,8 +217,6 @@ func (hp *HealthPoller) checkEndpoint(config EndpointConfig) HealthStatus {
 		status.CircuitOpen = true
 	}
 
-	hp.statuses[config.URL] = &status
-
 	return status
 }
 

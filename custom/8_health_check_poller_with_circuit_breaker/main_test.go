@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -176,14 +177,16 @@ func TestCircuitBreaker_Recovery(t *testing.T) {
 	}
 }
 
-// TestStatusChangeCallback testa que callback é chamado em mudanças de status
 func TestStatusChangeCallback(t *testing.T) {
-	callbackCalled := atomic.Int32{}
-	var lastOldStatus, lastNewStatus bool
+	var mu sync.Mutex
+	callbackCalls := []struct {
+		oldStatus bool
+		newStatus bool
+	}{}
 
 	requestCount := atomic.Int32{}
 
-	// Servidor que alterna entre healthy e unhealthy
+	// Servidor: primeiras 2 requisições OK, depois falha
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		count := requestCount.Add(1)
 		if count <= 2 {
@@ -196,37 +199,52 @@ func TestStatusChangeCallback(t *testing.T) {
 
 	poller := NewHealthPoller()
 
-	// Configurar callback
+	// Callback que guarda todas as transições
 	poller.onStatusChange = func(endpoint string, oldStatus, newStatus bool) {
-		callbackCalled.Add(1)
-		lastOldStatus = oldStatus
-		lastNewStatus = newStatus
-		t.Logf("Status change: %s | old=%v new=%v", endpoint, oldStatus, newStatus)
+		mu.Lock()
+		defer mu.Unlock()
+		callbackCalls = append(callbackCalls, struct {
+			oldStatus bool
+			newStatus bool
+		}{oldStatus, newStatus})
+		t.Logf("Transition: old=%v new=%v", oldStatus, newStatus)
 	}
 
 	poller.AddEndpoint(EndpointConfig{
 		URL:              server.URL,
 		PollInterval:     100 * time.Millisecond,
 		Timeout:          1 * time.Second,
-		FailureThreshold: 3,
+		FailureThreshold: 1, // Threshold 1 para falhar mais rápido
 		RecoveryTimeout:  5 * time.Second,
 	})
 
 	poller.Start()
 	defer poller.Stop()
 
-	// Esperar transição de healthy -> unhealthy acontecer
-	time.Sleep(400 * time.Millisecond)
+	// Esperar tempo suficiente para 4 checks acontecerem
+	time.Sleep(450 * time.Millisecond)
 
-	calls := callbackCalled.Load()
-	if calls == 0 {
-		t.Error("Callback should have been called at least once")
+	mu.Lock()
+	calls := callbackCalls
+	mu.Unlock()
+
+	// Deve ter pelo menos 2 transições:
+	// 1. false->true (primeiro check bem-sucedido)
+	// 2. true->false (terceiro check falha)
+	if len(calls) < 2 {
+		t.Fatalf("Expected at least 2 transitions, got %d: %+v", len(calls), calls)
 	}
 
-	// Última chamada deveria ser healthy=true -> healthy=false
-	if lastOldStatus != true || lastNewStatus != false {
-		t.Errorf("Expected transition from true->false, got %v->%v",
-			lastOldStatus, lastNewStatus)
+	// Primeira transição deve ser false->true
+	if calls[0].oldStatus != false || calls[0].newStatus != true {
+		t.Errorf("First transition should be false->true, got %v->%v",
+			calls[0].oldStatus, calls[0].newStatus)
+	}
+
+	// Segunda transição deve ser true->false
+	if calls[1].oldStatus != true || calls[1].newStatus != false {
+		t.Errorf("Second transition should be true->false, got %v->%v",
+			calls[1].oldStatus, calls[1].newStatus)
 	}
 }
 
