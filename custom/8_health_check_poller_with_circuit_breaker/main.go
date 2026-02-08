@@ -253,7 +253,6 @@ func (hp *HealthPoller) aggregateResults() {
 
 // GetStatus retorna status atual de um endpoint
 func (hp *HealthPoller) GetStatus(endpoint string) (HealthStatus, bool) {
-	// TODO: implementar com read lock
 	hp.mu.RLock()
 	defer hp.mu.RUnlock()
 	return *hp.statuses[endpoint], true
@@ -261,7 +260,6 @@ func (hp *HealthPoller) GetStatus(endpoint string) (HealthStatus, bool) {
 
 // GetAllStatuses retorna status de todos os endpoints
 func (hp *HealthPoller) GetAllStatuses() map[string]*HealthStatus {
-	// TODO: implementar com read lock
 	hp.mu.RLock()
 	defer hp.mu.RUnlock()
 	return hp.statuses
