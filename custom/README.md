@@ -1,6 +1,6 @@
 # Challenges Customizados
 
-## Event Bus
+## 1. Event Bus
 
 ### Aprendizados desse challenge:
 
@@ -127,7 +127,7 @@ func (eb *EventBus) Close() {
 }
 ```
 
-## Log Aggregator (Fan-in)
+## 2. Log Aggregator (Fan-in)
 
 ### O Desafio
 
@@ -326,7 +326,7 @@ func (la *LogAggregator) Stop() []LogEntry {
 
 ```
 
-## Image Pipeline
+## 3. Image Processor Pipeline
 
 Você vai construir um pipeline de 4 stages onde cada stage processa imagens e passa para o próximo, tudo rodando concorrentemente. É como uma linha de montagem, enquanto o Stage 1 está listando novos arquivos, o Stage 2 já está carregando imagens anteriores, o Stage 3 processando (converter em gray scale), e o Stage 4 salvando.
 
@@ -581,7 +581,7 @@ func (p *Pipeline) saver(ctx context.Context, inputChan <-chan ImageJob) {
 }
 ```
 
-## TCP Chat Server
+## 4. TCP Chat Server
 
 Este desafio é diferente dos anteriores porque você vai trabalhar com sockets TCP de baixo nível. Quando alguém conecta com telnet localhost 6969, você está recebendo uma conexão TCP bruta. Você precisa ler bytes dessa conexão, interpretar como mensagens, e enviar bytes de volta. É exatamente assim que servidores reais funcionam por baixo do capô.
 
@@ -1114,7 +1114,7 @@ func TestServer_RapidMessages(t *testing.T) {
 }
 ```
 
-## Rate Limiter Com Token Bucket
+## 5. Rate Limiter Com Token Bucket
 
 Você vai implementar um rate limiter thread-safe usando o algoritmo **Token Bucket**. 
 
@@ -1431,7 +1431,7 @@ func TestTokenBucket_RaceConditions(t *testing.T) {
 }
 ```
 
-## Worker Pool com Priority Quieu
+## 6. Worker Pool com Priority Quieu
 
 Você vai implementar um sistema de processamento de jobs com priorização thread-safe. Pensa em Sidekiq, Celery, ou qualquer background job processor que toda startup usa.
 
@@ -1938,7 +1938,7 @@ func TestPriorityOrdering(t *testing.T) {
 
 ---
 
-## LRU Cache Thread-Safe com TTL
+## 7. LRU Cache Thread-Safe com TTL
 
 Você vai implementar um cache completo de produção com política de eviction LRU (Least Recently Used) e expiração automática por TTL (Time To Live). Este é o tipo de sistema que está rodando em todo lugar.
 
@@ -2741,7 +2741,7 @@ func (hp *HealthPoller) Stop() {
 
 ---
 
-## Trie thread safe
+## 9. Trie thread safe
 
 Imagine que você está construindo o autocomplete do GitHub quando você digita nome de repositório. Enquanto você está digitando "react", milhares de outros usuários estão fazendo buscas simultaneamente. O sistema precisa ser thread-safe, mas se você simplesmente colocar um mutex global na trie inteira, vai virar um gargalo massivo, pois só uma pessoa pode buscar por vez.
 
@@ -2978,4 +2978,404 @@ func collectWords(node *TrieNode, currentWord string, words *[]string, limit int
 	// TODO: Implementar DFS recursivo
 	// Lembre-se de verificar se já coletou o limite de palavras
 }
+```
+
+## 10. Skip List Thread-Safe
+
+Skip Lists são a base dos Sorted Sets do Redis (ZADD, ZRANGE, ZRANK) e do storage engine do LevelDB/RocksDB. O ponto central: ao invés de balancear uma árvore deterministicamente (que é complexo), você usa probabilidade para manter O(log n) amortizado. Mais simples de implementar lock-free ou com fine-grained locking do que uma BST balanceada.
+
+read: `https://selfboot.cn/en/2024/09/09/leveldb_source_skiplist/`
+
+**Visualização**
+
+```
+Level 3: head ──────────────────────────── 50 ──────────── tail
+Level 2: head ────────── 20 ─────────────  50 ──── 70 ──── tail
+Level 1: head ─── 10 ─── 20 ─── 30 ──────  50 ─── 70 ──── tail
+Level 0: head ─── 10 ─── 20 ─── 30 ─── 40 50 ─── 70 ─── 90 tail
+```
+
+Cada node tem um array de `forward` pointers, um por nível onde ele participa. Quando inserimos um node, você joga uma moeda para deciodir quantos níveis ele sobe.
+
+Uma skip list é várias linked lists empilhadas. O nível 0 tem todos os nodes. O nível 1 tem ~1/2. O nível 2 ~1/4. E assim por diante.
+
+**Probabilidade = p 0.5** -> em média, então metade dos nodes estão no nível 1, um quarto no nível 2, etc.
+
+**O desafio de concorrência vs a Trie**:
+
+- Na trie: locking vertical (desce por chars, cada node tem seu mutex)
+- Na Skip List: locking **horizontal** na lista (varre níveis, então precisa do **update array**, que é um array de predecessores, antes de modificar ponteiros em múltiplos níveis ao mesmo tempo)
+
+**Update array pattern**: antes de inserir / deletar, percorremos todos os níveis de cima para baixo, guardando em `update[level]` o último node que ficou "à esquerda" do ponto de inserção naquele nível. Depois, é modificado os ponteiros usando esses predecessores. Sem isso, não conseguimos saber onde conectar o novo node em cada nível.
+
+### Trade-offs vs alternativas
+
+| Estrutura         |   Busca   |  Insert    |  Delete    |      Concorrência       |
+| :---------------- |  :------: |  :------:  |  :------:  |  ---------------------: | 
+| Skip List         |  O(log n) |  O(log n)  |  O(log n)  |  Fácil (update array)   |
+| BST balanceada    |  O(log n) |  O(log n)  |  O(log n)  |  Difícil (rotações)     |
+| B-Tree    	    |  O(log n) |  O(log n)  |  O(log n)  |  Moderado               |
+| Hash Map 			|    O(1)   |    O(1)    |    O(1)    |  Simples, mas sem ordem |
+
+
+A skip list vai ser uma boa estrutura ideal quando precisamos de **range queries ordenadas** com implementação simples.
+
+**Por que a probabilidade garante O(log n)?**
+
+Um ponto importante de entender dessas estruturas, é que para resolver o problema de atualizar e deletar precisar re-organizar o nível inteiro, o autor William Pugh sugere a abordagem probabilistica, para não precisar re-organizar o nível inteiro.
+
+Quando inserimos um node, jogamos uma moeda (`rand < p`) para decidir se ela "sobe" de nível. Com p = 0.5, na *média*:
+
+- ~50% dos nodes existem no nível 1
+- ~25% no nível 2
+- ~12,5% no nível 3
+- etc...
+
+E todos no nível 0...
+
+Isso vai criar a mesma distribuição de uma busca binária (binary search), a busca começa no nível mais alto (poucos nodes, que dá pulos grandes) e vai descendo, ou seja O(log n).
+
+**Por que sem probabilidade seria O(n) na atualização?**
+
+Se quisessemos garantir O(log n) deterministicamente, teriamos que manter a invariante de que exatamente metade dos nodes estão em cada nível acima.
+
+Quando inserimos ou deletamos um node, precisamos **reorganizar quais nodes participam de cada nível** para manter esse balanceamento. Ou seja, reconstruir os níveis afetados, O(n).
+
+Com probabilidade, simplesmente abandonamos a garantia determinística e aceitamos O(log n) esperado. O node decide seu próprio nível na hora do insert, uma vez, e nunca muda. Ou seja **nada precisa ser rebalanceado**.
+
+Ë o mesmo trade-off do treap (árvore + heap com prioridade aleatória) vs AVL Tree.
+
+### Estrutura de arquivos
+
+`main.go`
+
+```go
+package main
+
+import (
+	"fmt"
+	"math/rand"
+)
+
+func main() {
+	sl := NewSkipList(4, 0.5, rand.New(rand.NewSource(42)))
+
+	// Insert
+	sl.Insert(10, "ten")
+	sl.Insert(50, "fifty")
+	sl.Insert(20, "twenty")
+	sl.Insert(30, "thirty")
+	sl.Insert(70, "seventy")
+
+	// Search
+	if val, ok := sl.Search(30); ok {
+		fmt.Printf("Found 30: %v\n", val) // "thirty"
+	}
+
+	// RangeSearch: retorna todos os valores com score entre min e max (inclusive)
+	results := sl.RangeSearch(15, 55)
+	fmt.Printf("Range [15, 55]: %v\n", results) // [twenty thirty fifty]
+
+	// Delete
+	sl.Delete(20)
+	if _, ok := sl.Search(20); !ok {
+		fmt.Println("20 deleted successfully")
+	}
+
+	// Stats (útil para debugging)
+	fmt.Printf("Size: %d\n", sl.Size())
+}
+```
+
+`skiplist.go`
+
+```go
+package main
+
+import (
+	"math/rand"
+	"sync"
+)
+
+const MaxLevel = 16
+
+// SkipListNode representa um node em múltiplos níveis
+type SkipListNode struct {
+	score   int
+	value   any
+	forward []*SkipListNode // forward[i] = próximo node no nível i
+	mu      sync.RWMutex    // opcional: se quiser locking por node
+}
+
+// SkipList é a estrutura principal
+type SkipList struct {
+	head     *SkipListNode
+	maxLevel int
+	p        float64 // probabilidade de subir de nível (geralmente 0.5)
+	level    int     // nível atual máximo utilizado
+	size     int
+	mu       sync.RWMutex
+	rng      *rand.Rand
+}
+
+// NewSkipList cria uma nova skip list
+// maxLevel: altura máxima permitida
+// p: probabilidade de um node subir de nível (0.5 = 50%)
+// rng: source de random (injetado para testes determinísticos)
+func NewSkipList(maxLevel int, p float64, rng *rand.Rand) *SkipList {
+	// TODO: criar head node com maxLevel forward pointers (todos nil)
+	// head.score pode ser -infinito (math.MinInt)
+	panic("not implemented")
+}
+
+// randomLevel gera a altura de um novo node probabilisticamente
+// Começa em 1 e incrementa enquanto rand < p E level < maxLevel
+func (sl *SkipList) randomLevel() int {
+	// TODO
+	panic("not implemented")
+}
+
+// Insert insere ou atualiza um score+value na lista
+// Usa o update array pattern:
+//  1. Percorre do nível mais alto até 0, guardando predecessores em update[]
+//  2. Gera randomLevel para o novo node
+//  3. Reconecta ponteiros usando update[]
+func (sl *SkipList) Insert(score int, value any) {
+	// TODO
+	panic("not implemented")
+}
+
+// Search busca por score. Retorna (value, true) se encontrado.
+// Percorre de cima para baixo: enquanto forward[level] existe e score < target,
+// avança. Quando não pode mais avançar, desce um nível.
+func (sl *SkipList) Search(score int) (any, bool) {
+	// TODO
+	panic("not implemented")
+}
+
+// Delete remove o node com o score dado, se existir.
+// Mesmo padrão do Insert: update array primeiro, depois reconecta ponteiros.
+func (sl *SkipList) Delete(score int) bool {
+	// TODO
+	panic("not implemented")
+}
+
+// RangeSearch retorna todos os valores com score entre min e max (inclusive),
+// em ordem crescente. Hint: chegue até min usando a lógica de Search,
+// depois percorra o nível 0 enquanto score <= max.
+func (sl *SkipList) RangeSearch(min, max int) []any {
+	// TODO
+	panic("not implemented")
+}
+
+// Size retorna o número de elementos na lista
+func (sl *SkipList) Size() int {
+	// TODO
+	panic("not implemented")
+}
+```
+
+`skiplist_test.go`
+
+```go
+package main
+
+import (
+	"fmt"
+	"math/rand"
+	"sync"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func newTestSkipList() *SkipList {
+	return NewSkipList(4, 0.5, rand.New(rand.NewSource(42)))
+}
+
+// --- Testes Básicos ---
+
+func TestInsertAndSearch(t *testing.T) {
+	sl := newTestSkipList()
+
+	sl.Insert(10, "ten")
+	sl.Insert(30, "thirty")
+	sl.Insert(20, "twenty")
+
+	val, ok := sl.Search(20)
+	assert.True(t, ok)
+	assert.Equal(t, "twenty", val)
+
+	_, ok = sl.Search(99)
+	assert.False(t, ok)
+}
+
+func TestInsertUpdate(t *testing.T) {
+	sl := newTestSkipList()
+	sl.Insert(10, "ten")
+	sl.Insert(10, "TEN-updated") // mesmo score, deve atualizar
+
+	val, ok := sl.Search(10)
+	assert.True(t, ok)
+	assert.Equal(t, "TEN-updated", val)
+	assert.Equal(t, 1, sl.Size()) // não deve duplicar
+}
+
+func TestDelete(t *testing.T) {
+	sl := newTestSkipList()
+	sl.Insert(10, "ten")
+	sl.Insert(20, "twenty")
+	sl.Insert(30, "thirty")
+
+	deleted := sl.Delete(20)
+	assert.True(t, deleted)
+	assert.Equal(t, 2, sl.Size())
+
+	_, ok := sl.Search(20)
+	assert.False(t, ok)
+
+	deleted = sl.Delete(99) // não existe
+	assert.False(t, deleted)
+}
+
+func TestRangeSearch(t *testing.T) {
+	sl := newTestSkipList()
+	for _, s := range []int{10, 20, 30, 40, 50, 60, 70} {
+		sl.Insert(s, fmt.Sprintf("%d", s))
+	}
+
+	results := sl.RangeSearch(20, 50)
+	assert.Equal(t, []any{"20", "30", "40", "50"}, results)
+
+	// range vazio
+	results = sl.RangeSearch(100, 200)
+	assert.Empty(t, results)
+}
+
+func TestRangeSearchEmptyList(t *testing.T) {
+	sl := newTestSkipList()
+	results := sl.RangeSearch(0, 100)
+	assert.Empty(t, results)
+}
+
+// --- Testes de Ordem ---
+
+func TestInsertionOrder(t *testing.T) {
+	sl := newTestSkipList()
+	scores := []int{50, 10, 90, 30, 70, 20, 80, 40, 60}
+	for _, s := range scores {
+		sl.Insert(s, s)
+	}
+
+	results := sl.RangeSearch(10, 90)
+	assert.Len(t, results, 9)
+	for i := 1; i < len(results); i++ {
+		assert.LessOrEqual(t, results[i-1].(int), results[i].(int))
+	}
+}
+
+// --- Testes de Concorrência ---
+
+func TestConcurrentInserts(t *testing.T) {
+	sl := NewSkipList(8, 0.5, rand.New(rand.NewSource(0)))
+	var wg sync.WaitGroup
+	n := 100
+
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(score int) {
+			defer wg.Done()
+			sl.Insert(score, score)
+		}(i)
+	}
+	wg.Wait()
+
+	assert.Equal(t, n, sl.Size())
+	for i := 0; i < n; i++ {
+		_, ok := sl.Search(i)
+		assert.True(t, ok, "score %d not found", i)
+	}
+}
+
+func TestConcurrentReadsAndWrites(t *testing.T) {
+	sl := NewSkipList(8, 0.5, rand.New(rand.NewSource(0)))
+	for i := 0; i < 50; i++ {
+		sl.Insert(i, i)
+	}
+
+	var wg sync.WaitGroup
+	// Writers
+	for i := 50; i < 100; i++ {
+		wg.Add(1)
+		go func(score int) {
+			defer wg.Done()
+			sl.Insert(score, score)
+		}(i)
+	}
+	// Readers
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(score int) {
+			defer wg.Done()
+			sl.Search(score)
+		}(i)
+	}
+	// Range readers
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sl.RangeSearch(0, 100)
+		}()
+	}
+	wg.Wait()
+}
+
+func TestConcurrentDeletes(t *testing.T) {
+	sl := NewSkipList(8, 0.5, rand.New(rand.NewSource(0)))
+	n := 50
+	for i := 0; i < n; i++ {
+		sl.Insert(i, i)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(score int) {
+			defer wg.Done()
+			sl.Delete(score)
+		}(i)
+	}
+	wg.Wait()
+
+	assert.Equal(t, 0, sl.Size())
+}
+
+// Run with: go test -race ./...
+```
+
+---
+
+## Dicas Chave (sem entregar a solução)
+
+**Update array pattern** — o coração do Insert e Delete:
+```
+update := make([]*SkipListNode, sl.maxLevel)
+curr := sl.head
+for i := sl.level - 1; i >= 0; i-- {
+    for curr.forward[i] != nil && curr.forward[i].score < score {
+        curr = curr.forward[i]
+    }
+    update[i] = curr  // predecessor nesse nível
+}
+// Agora curr.forward[0] é o candidato (verificar se score == target)
+```
+
+**randomLevel:**
+```
+level := 1
+for level < sl.maxLevel && sl.rng.Float64() < sl.p {
+    level++
+}
+return level
 ```
