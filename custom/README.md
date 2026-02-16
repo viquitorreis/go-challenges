@@ -3379,3 +3379,153 @@ for level < sl.maxLevel && sl.rng.Float64() < sl.p {
 }
 return level
 ```
+
+## 11. Exchange Order Book
+
+Antes de implementar:
+
+Um order book é simplesmente duas listas ordenadas:
+
+- **bids**: quem quer comprar
+- **asks**: quem quer vender
+
+O matching acontece quando o melhor bid encontra o melhor ask num preço aceitável para os dois lados.
+
+```
+BIDS (compra)         		ASKS (venda)
+preço | qty           		preço | qty
+ 102  |  5    <- max     	103  |  3  <- min
+ 101  | 10              	104  |  8
+ 100  |  2              	105  | 15
+```
+
+O matching ocorre quando `max(bids) >= min(asks)`, ou seja, alguém quer pagar **pelo menos tanto** quando alguém quer receber.
+
+No exemplo acima, não tem match. Se chegasse um bid de 103, ele ia bater com o ask de 103.
+
+**Price-time priority**: essa é a regra de desempate entre duas ordens no mesmo preço, a que chegou primeiro é executada primeiro. Isso significa que cada nível de preço tem uma fila fifo de ordens.
+
+---
+
+### Estrutura de dados ideal
+
+Inicialmente, você pode achar que uma heap pode ser boa para esse challenge. Mas não é ideal.
+
+Problema com uma heap: ela te dá O(1) para peek no topo e O(log n) para insert/remove, mas **não te dá cancelamento eficiente**. Se um usuário cancela uma ordem que está no meio da heap, você precisa encontrar essa ordem, que vai ser O(n).
+
+Uma estrutura boa para o order book em produção é um **sorted map**, de price -> fila de ordens. Em go seria algo como `map[int][]*Order`, combinado com uma lista de preços ordenados.
+
+- Para os bids (compra), queremos o maior preço primeiro
+- Para os asks (venda), queremos o menor preço primeiro
+
+Mas pode ser usado heap, como indice de preços e não de ordens individuais. Cada entrada no heap, é um nível de preço, e cada nível aponta para uma fila FIFO de ordens. Que vai dar o melhor dos dois mundos.
+
+---
+
+### Goroutines e buckets por ticker
+
+Em produção, cada ticekr tem seu próprio order book isolado, como um bucket, e teriamos uma goroutine (ou pool) dedicada por ticker.
+
+Centralizar isso tudo em um único lock seria um baita bottleneck e ponto de falha que uma exchange não pode ter.
+
+Aqui, vamos fazer um único order book com um mutex, mas a arquitetura de buckets é o que teriamos em produção, é bom ter isso em mente.
+
+---
+
+### Challenge
+
+main.go
+
+```go
+package main
+
+import "fmt"
+
+func main() {
+    ob := NewOrderBook("BTC-USD")
+
+    ob.AddOrder(NewOrder("o1", "alice", Bid, 102, 5))
+    ob.AddOrder(NewOrder("o2", "bob",   Ask, 103, 3))
+    ob.AddOrder(NewOrder("o3", "carol", Bid, 103, 2)) // deve matchear com o2
+
+    trades := ob.Match()
+    for _, t := range trades {
+        fmt.Printf("TRADE: %s x %s @ %.2f qty %d\n",
+            t.BidOrderID, t.AskOrderID, t.Price, t.Quantity)
+    }
+
+    ob.Cancel("o1")
+    fmt.Printf("Book depth — bids: %d asks: %d\n",
+        ob.BidDepth(), ob.AskDepth())
+}
+```
+
+orderbook.go -> structs e assinaturas para implementar
+
+```go
+package main
+
+import "sync"
+
+type Side int
+const (
+    Bid Side = iota
+    Ask
+)
+
+// Order representa uma ordem individual no book
+type Order struct {
+    ID        string
+    UserID    string
+    Side      Side
+    Price     int       // em centavos para evitar float
+    Quantity  int
+    Timestamp int64     // unix nano — usado para price-time priority
+}
+
+// Trade representa uma execução — quando bid e ask se encontram
+type Trade struct {
+    BidOrderID string
+    AskOrderID string
+    Price      int
+    Quantity   int
+}
+
+// PriceLevel agrupa todas as ordens num mesmo preço (fila FIFO)
+type PriceLevel struct {
+    Price  int
+    Orders []*Order
+}
+
+// OrderBook mantém bids e asks para um único ticker
+type OrderBook struct {
+    Symbol string
+
+    // TODO: estrutura para bids ordenados (maior preço primeiro)
+    // TODO: estrutura para asks ordenados (menor preço primeiro)
+    // TODO: índice de orderID → Order para cancelamento O(1)
+
+    mu sync.Mutex
+}
+
+func NewOrderBook(symbol string) *OrderBook { panic("not implemented") }
+func NewOrder(id, userID string, side Side, price, qty int) *Order { panic("not implemented") }
+
+// AddOrder adiciona uma ordem ao lado correto do book
+func (ob *OrderBook) AddOrder(o *Order) { panic("not implemented") }
+
+// Match executa todas as ordens que se cruzam e retorna os trades gerados.
+// Regra: enquanto max(bid) >= min(ask), executa pelo preço do ask (ou bid, sua escolha).
+// Quantidade executada = min(bid.Quantity, ask.Quantity).
+// Ordens parcialmente executadas permanecem no book com quantidade reduzida.
+func (ob *OrderBook) Match() []Trade { panic("not implemented") }
+
+// Cancel remove uma ordem do book por ID
+func (ob *OrderBook) Cancel(orderID string) bool { panic("not implemented") }
+
+// BidDepth retorna o número de ordens ativas no lado bid
+func (ob *OrderBook) BidDepth() int { panic("not implemented") }
+
+// AskDepth retorna o número de ordens ativas no lado ask
+func (ob *OrderBook) AskDepth() int { panic("not implemented") }
+```
