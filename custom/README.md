@@ -3529,3 +3529,272 @@ func (ob *OrderBook) BidDepth() int { panic("not implemented") }
 // AskDepth retorna o número de ordens ativas no lado ask
 func (ob *OrderBook) AskDepth() int { panic("not implemented") }
 ```
+
+## 12. TCP Server com Worker Pool e Backpressure
+
+### Por que importa
+
+Servidores em produção não podem aceitar conexões ilimitadas, precisamos controlar quantas requisições simultâneas processa para não esgotar a CPU, memória ou file descriptors.
+
+Worker pools com filas limitadas nos permitem fazer isso, podemos rejeitar ou postergar o aceite de novas conexões quando o sistema está saturado. Isso é um backpressure natural, o servidor comunica ao cliente "servidor sobrecarregado, tente depois", ao invés de crashar o degradar o sistema todo.
+
+### Entendimento
+
+Existem duas arquiteturas clássicas para TCP servers em Go:
+
+**Goroutine-per-connection** (padrão ingênuo)
+
+Cada conexão nova vai spawnar uma goroutine dedicata que vive até a conexão fechar. Simples de implementar, mas não tem controle de backpressure. Se chegar 10k conexões simultâneas, você cria 10k de goroutines e pode estourar a quantidade de memória usada ou degradas performance por context switching excessivo no go scheduler.
+
+**Worker pool com fila limitada**
+
+Temos N workers fixos (goroutines) que pegam conexões de uma fila com capacidade M. Se a fila encher, novas conexões são rejeitadas ou ficam em espera. Isso dá um controle total sobre consumação de recursos. Podemos escolher quantos workers podemos sustentar e quantas conexões podem enfileiras antes de rejeitar.
+
+A diferença central é que no worker pool você **desacopla** aceitar conexões de processar conexões. O `Accept()` loop continua rodando, mas as conexões vão para um channel com buffer. Se o channel encher, o `select` com `default` rejeita a conexão imediatamente sem bloquear o accept loop.
+
+### Modelo mental
+
+Imagina um restaurante com 4 garçons (workers), e uma fila de espera com 10 lugares (queue). Quando chega o 15 cliente e a fila está cheia, o host diz "estamos lotados, volte em 20 minutos". O restaurante não contrata mais garçons na hroa nem deixa 100 pesoas esperando indefinidamente. O restaurante não contrata mais garços na hora e nem deixa 100 pessoas esperando indefinidamente, ele sabe a sua capacidade e comunica seus limites.
+
+No TCP server com worker pool, o accept loop é o host que recebe clientes. Os workers são os garçons que processam pedidos. A fila `connCh` é a área de espera. Quando a fila enche, você rejeita a conexão imediatamente (close) em vez de bloquear o accept loop ou criar goroutines sem limite.
+
+---
+
+### O que você vai implementar
+
+Um TCP server que aceita conexões em `:8080`, enfileira até `QueueSize` conexões num channel, e processa com `Workers` goroutines fixas. Quando a fila está cheia, novas conexões são rejeitadas (close imediato). O servidor também suporta shutdown graceful, para de aceitar novas conexões mas espera as ativas terminarem.
+
+`main.go`
+
+```go
+package main
+
+import (
+	"fmt"
+	"log"
+	"time"
+)
+
+func main() {
+	config := ServerConfig{
+		Addr:        ":8080",
+		Workers:     4,
+		QueueSize:   10,
+		IdleTimeout: 30 * time.Second,
+	}
+
+	server := NewTCPServer(config, EchoHandler)
+
+	log.Printf("Starting TCP server on %s with %d workers, queue size %d\n",
+		config.Addr, config.Workers, config.QueueSize)
+
+	if err := server.Start(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// EchoHandler é um handler simples que faz echo de tudo que recebe
+func EchoHandler(conn *Connection) error {
+	defer conn.Close()
+
+	buf := make([]byte, 1024)
+	for {
+		n, err := conn.Read(buf)
+		if err != nil {
+			return err
+		}
+
+		if _, err := conn.Write(buf[:n]); err != nil {
+			return err
+		}
+	}
+}
+```
+
+`server.go`
+
+```go
+package main
+
+import (
+	"net"
+	"sync"
+	"time"
+)
+
+type ServerConfig struct {
+	Addr        string        // endereço para bind, ex: ":8080"
+	Workers     int           // número de workers no pool
+	QueueSize   int           // capacidade da fila de conexões
+	IdleTimeout time.Duration // timeout para conexões idle
+}
+
+// Connection wraps net.Conn com métodos auxiliares
+type Connection struct {
+	net.Conn
+	// TODO: adicionar campos úteis como ID, timestamp, etc
+}
+
+// Handler processa uma conexão. Retorna erro se algo der errado.
+type Handler func(*Connection) error
+
+// TCPServer gerencia o worker pool e a fila de conexões
+type TCPServer struct {
+	config   ServerConfig
+	handler  Handler
+	listener net.Listener
+	connCh   chan *Connection // fila de conexões pendentes
+	wg       sync.WaitGroup
+	// TODO: campos para shutdown graceful
+}
+
+func NewTCPServer(config ServerConfig, handler Handler) *TCPServer {
+	// TODO: inicializar server
+	panic("not implemented")
+}
+
+// Start inicia o servidor — accept loop + worker pool
+func (s *TCPServer) Start() error {
+	// TODO:
+	// 1. net.Listen no config.Addr
+	// 2. Spawnar workers (s.config.Workers goroutines)
+	// 3. Accept loop: aceita conexões e tenta enfileirar em s.connCh
+	//    - Se connCh estiver cheio, rejeita a conexão (close imediato)
+	// 4. Cada worker pega conexões de s.connCh e chama s.handler
+	panic("not implemented")
+}
+
+// Shutdown para o servidor gracefully
+func (s *TCPServer) Shutdown() error {
+	// TODO:
+	// 1. Fecha s.listener (para de aceitar novas conexões)
+	// 2. Fecha s.connCh (workers terminam quando drenam a fila)
+	// 3. s.wg.Wait() até todos os workers terminarem
+	panic("not implemented")
+}
+```
+
+`server_test.go`
+
+```go
+func TestEchoServer(t *testing.T) {
+	config := ServerConfig{
+		Addr:        ":0", // porta aleatória
+		Workers:     2,
+		QueueSize:   5,
+		IdleTimeout: 5 * time.Second,
+	}
+
+	server := NewTCPServer(config, EchoHandler)
+	go server.Start()
+	defer server.Shutdown()
+
+	// espera servidor subir
+	<-server.ready
+
+	conn, err := net.Dial("tcp", server.Addr())
+	require.NoError(t, err)
+	defer conn.Close()
+
+	// envia mensagem
+	_, err = conn.Write([]byte("hello\n"))
+	require.NoError(t, err)
+
+	// lê echo
+	reader := bufio.NewReader(conn)
+	response, err := reader.ReadString('\n')
+	require.NoError(t, err)
+	assert.Equal(t, "hello\n", response)
+}
+
+func TestBackpressure(t *testing.T) {
+	config := ServerConfig{
+		Addr:      ":0",
+		Workers:   2,
+		QueueSize: 2, // fila pequena pra forçar rejeição
+	}
+
+	// handler lento — segura conexão por 1s
+	slowHandler := func(conn *Connection) error {
+		defer conn.Close()
+		time.Sleep(1 * time.Second)
+		return nil
+	}
+
+	server := NewTCPServer(config, slowHandler)
+	go server.Start()
+	defer server.Shutdown()
+
+	<-server.ready
+
+	// abre Workers + QueueSize conexões (todas devem ser aceitas)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	accepted := 0
+	rejected := 0
+
+	for range 10 {
+		wg.Go(func() {
+			conn, err := net.Dial("tcp", server.Addr())
+			if err != nil {
+				mu.Lock()
+				rejected++
+				mu.Unlock()
+				return
+			}
+			defer conn.Close()
+
+			buf := make([]byte, 1)
+			conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+			_, err = conn.Read(buf)
+
+			mu.Lock()
+			if err != nil {
+				rejected++
+			} else {
+				accepted++
+			}
+			mu.Unlock()
+		})
+	}
+
+	wg.Wait()
+
+	// deve ter rejeitado algumas conexões
+	assert.Greater(t, rejected, 0, "server should reject connections when saturated")
+}
+
+func TestGracefulShutdown(t *testing.T) {
+	config := ServerConfig{
+		Addr:      ":0",
+		Workers:   2,
+		QueueSize: 5,
+	}
+
+	server := NewTCPServer(config, EchoHandler)
+	go server.Start()
+	<-server.ready
+
+	// abre conexão
+	conn, err := net.Dial("tcp", server.Addr())
+	require.NoError(t, err)
+
+	// shutdown deve esperar conexões ativas terminarem
+	done := make(chan struct{})
+	go func() {
+		server.Shutdown()
+		close(done)
+	}()
+
+	// fecha conexão
+	conn.Close()
+
+	// shutdown deve completar
+	select {
+	case <-done:
+		// ok
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown took too long")
+	}
+}
+```
