@@ -3798,3 +3798,468 @@ func TestGracefulShutdown(t *testing.T) {
 	}
 }
 ```
+
+## 13. Idempotent Payment Processing with PostgreSQL
+
+Em qualquer sistema de pagamento (Stripe, Square, etc), as requisições podem falhar de forma imprevizível: timeout de rede, crash do servidor após processar, mas antes de responder o cliente. O cliente faz retry com a mesma requisição, mas **não pode processar o pagamento duas vezes**
+
+Idempotência resolve isso: a mesma requisição com a mesma chave sempre retorna o mesmo resultado, sem duplicatas.
+
+Existem várias formas de resolver isso:
+
+1. Usar advisory lock no PostgreSQL: porém causa contenção nos recursos, outras requisições podem ficar esperando.
+2. Usar sharding por idempotencyKey. É o que vamos fazer.
+
+**Solução:**
+
+Sharding por idempotencyKey. Cada shard é uma fila com 1 worker. Requisições com a mesma chave vão sempre pro mesmo shard -> processam sequencialmente.
+
+Chaves diferentes vão rodar em paralelo.
+
+**Worker goroutine* *:
+
+Cada shard tem 1 worker que recebe tasks via channel, processa sequencialmente. Requisições com chaves diferentes vão pra shards diferentes -> paralelo.
+
+---
+
+### Schema PostgreSQL
+
+```sql
+IF NOT EXISTS (
+	SELECT 1
+	FROM pg_type
+	WHERE typname = 'payment_status'
+) THEN
+	CREATE TYPE payment_status AS ENUM (
+		'pending',
+		'completed',
+		'failed'
+	);
+
+	RAISE NOTICE 'ENUM payment_status created.';
+END IF;
+
+CREATE TABLE IF NOT EXISTS payments (
+    id BIGSERIAL PRIMARY KEY,
+    idempotency_key VARCHAR(255) NOT NULL UNIQUE,
+    user_id VARCHAR(255) NOT NULL,
+    amount BIGINT NOT NULL, -- centavos
+    currency VARCHAR(3) NOT NULL,
+    status payment_status NOT NULL, -- 'pending', 'completed', 'failed'
+    stripe_charge_id VARCHAR(255),
+    error_message VARCHAR(255),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_idempotency_key ON payments(idempotency_key);
+CREATE INDEX IF NOT EXISTSidx_user_id ON payments(user_id);
+```
+
+---
+
+### Challenge
+
+**main.go**
+
+```go
+package main
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"log"
+
+	_ "github.com/lib/pq"
+)
+
+
+func main() {
+	db := NewDB()
+	defer db.conn.Close()
+
+	service := NewPaymentService(db, 4) // 4 shards
+
+	// Primeira requisição — processa
+	result1, err := service.ProcessPayment(context.Background(), &PaymentRequest{
+		IdempotencyKey: "key-123",
+		UserID:         "alice",
+		Amount:         10000,
+		Currency:       "USD",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Payment 1: ID=%d Status=%s\n", result1.PaymentID, result1.Status)
+
+	// Segunda requisição com MESMA chave — retorna resultado anterior
+	result2, err := service.ProcessPayment(context.Background(), &PaymentRequest{
+		IdempotencyKey: "key-123",
+		UserID:         "alice",
+		Amount:         10000,
+		Currency:       "USD",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Payment 2 (retry): ID=%d Status=%s\n", result2.PaymentID, result2.Status)
+
+	if result1.PaymentID == result2.PaymentID {
+		fmt.Println("Idempotência garantida: mesma chave, mesmo resultado")
+	}
+
+	// Terceira requisição com chave diferente — cria novo pagamento
+	result3, err := service.ProcessPayment(context.Background(), &PaymentRequest{
+		IdempotencyKey: "key-456",
+		UserID:         "alice",
+		Amount:         5000,
+		Currency:       "USD",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Payment 3: ID=%d Status=%s\n", result3.PaymentID, result3.Status)
+}
+```
+
+**payment.go**
+
+```go
+package main
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"hash/fnv"
+	"time"
+)
+
+type PaymentRequest struct {
+	IdempotencyKey string
+	UserID         string
+	Amount         int64
+	Currency       string
+}
+
+type PaymentResult struct {
+	PaymentID      int64
+	Status         string
+	StripeChargeID string
+	ErrorMessage   string
+}
+
+type PaymentService struct {
+	db     *sql.DB
+	shards []*Shard
+}
+
+// Shard processa pagamentos sequencialmente para um conjunto de chaves
+type Shard struct {
+	id   int
+	reqCh chan *paymentTask
+	// TODO: adicionar campos necessários
+}
+
+type paymentTask struct {
+	req    *PaymentRequest
+	result chan *paymentTaskResult
+}
+
+type paymentTaskResult struct {
+	result *PaymentResult
+	err    error
+}
+
+func NewPaymentService(db *sql.DB, numShards int) *PaymentService {
+	// TODO: inicializar service com N shards
+	// cada shard tem sua goroutine worker que processa a fila
+	panic("not implemented")
+}
+
+// ProcessPayment enfileira um pagamento no shard correto baseado no hash da chave
+// Retorna o resultado (novo ou anterior se já processado)
+func (ps *PaymentService) ProcessPayment(ctx context.Context, req *PaymentRequest) (*PaymentResult, error) {
+	// TODO: 
+	// 1. hash(idempotencyKey) % numShards → shard index
+	// 2. Enfileira requisição no shard via channel
+	// 3. Aguarda resultado do shard
+	panic("not implemented")
+}
+
+// shardWorker processa requisições sequencialmente para um shard
+// Cada requisição: SELECT + INSERT ON CONFLICT DO NOTHING
+func (s *Shard) worker(db *sql.DB) {
+	// TODO:
+	// loop infinito: recebe task do s.reqCh
+	// para cada task:
+	//   1. SELECT * FROM payments WHERE idempotency_key = ? → já existe?
+	//      SIM: retorna resultado anterior
+	//      NÃO: continua
+	//   2. Processa pagamento (simula Stripe)
+	//   3. INSERT ... ON CONFLICT DO NOTHING
+	//   4. SELECT * para recuperar o resultado inserido
+	//   5. Envia resultado via task.result
+	panic("not implemented")
+}
+
+func hashKey(key string, shards int) int64 {
+	h := fnv.New64a()
+	h.Write([]byte(key))
+	return int64(h.Sum64() % uint64(shards))
+}
+
+func processStripeCharge(ctx context.Context, amount int64, userID string) (chargeID string, err error) {
+	// TODO: simular processamento da Stripe
+	// retorna um charge ID fictício e nil error
+	panic("not implemented")
+}
+```
+
+**db.go**
+
+```go
+package main
+
+import (
+	"database/sql"
+	"log"
+)
+
+type DB struct {
+	conn *sql.DB
+}
+
+func NewDB() *DB {
+	db, err := sql.Open("postgres",
+		"host=localhost user=postgres password=postgres dbname=payments_test port=5444 sslmode=disable")
+	if err != nil {
+		log.Fatalf("err opening db: %v", err)
+	}
+
+	if err := createTables(db); err != nil {
+		log.Fatalf("err opening db: %v", err)
+	}
+
+	return &DB{
+		conn: db,
+	}
+}
+
+func createTables(db *sql.DB) error {
+	_, err := db.Exec(`
+DO $$
+BEGIN
+	IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'payment_status') THEN
+		CREATE TYPE payment_status AS ENUM ('pending', 'completed', 'failed');
+	END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS payments (
+    id BIGSERIAL PRIMARY KEY,
+    idempotency_key VARCHAR(255) NOT NULL UNIQUE,
+    user_id VARCHAR(255) NOT NULL,
+    amount BIGINT NOT NULL,
+    currency VARCHAR(3) NOT NULL,
+    status payment_status NOT NULL,
+    stripe_charge_id VARCHAR(255),
+    error_message VARCHAR(255),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_idempotency_key ON payments(idempotency_key);
+CREATE INDEX IF NOT EXISTS idx_user_id ON payments(user_id);
+	`)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+```
+
+**payment_test.go**
+
+```go
+package main
+
+import (
+	"context"
+	"database/sql"
+	"sync"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func setupTestDB(t *testing.T) *sql.DB {
+	db, err := sql.Open("postgres",
+		"host=localhost user=postgres password=postgres dbname=payments_test sslmode=disable")
+	require.NoError(t, err)
+
+	_, err = db.Exec(`DROP TYPE IF EXISTS payment_status CASCADE`)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TYPE payment_status AS ENUM ('pending', 'completed', 'failed')`)
+	require.NoError(t, err)
+	_, err = db.Exec(`DROP TABLE IF EXISTS payments`)
+	require.NoError(t, err)
+	_, err = db.Exec(`
+		CREATE TABLE payments (
+			id BIGSERIAL PRIMARY KEY,
+			idempotency_key VARCHAR(255) NOT NULL UNIQUE,
+			user_id VARCHAR(255) NOT NULL,
+			amount BIGINT NOT NULL,
+			currency VARCHAR(3) NOT NULL,
+			status payment_status NOT NULL,
+			stripe_charge_id VARCHAR(255),
+			error_message VARCHAR(255),
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)
+	`)
+	require.NoError(t, err)
+
+	return db
+}
+
+// TestIdempotency — mesma chave retorna mesmo resultado
+func TestIdempotency(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	service := NewPaymentService(db, 4)
+	ctx := context.Background()
+
+	req := &PaymentRequest{
+		IdempotencyKey: "idempotent-key-1",
+		UserID:         "alice",
+		Amount:         10000,
+		Currency:       "USD",
+	}
+
+	result1, err := service.ProcessPayment(ctx, req)
+	require.NoError(t, err)
+	assert.NotZero(t, result1.PaymentID)
+	assert.Equal(t, "completed", result1.Status)
+
+	result2, err := service.ProcessPayment(ctx, req)
+	require.NoError(t, err)
+
+	assert.Equal(t, result1.PaymentID, result2.PaymentID)
+	assert.Equal(t, result1.Status, result2.Status)
+	assert.Equal(t, result1.StripeChargeID, result2.StripeChargeID)
+}
+
+// TestConcurrentIdempotency — 10 goroutines com mesma chave não duplicam
+func TestConcurrentIdempotency(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	service := NewPaymentService(db, 4)
+	ctx := context.Background()
+
+	req := &PaymentRequest{
+		IdempotencyKey: "concurrent-key-1",
+		UserID:         "bob",
+		Amount:         5000,
+		Currency:       "USD",
+	}
+
+	results := make([]*PaymentResult, 10)
+	errs := make([]error, 10)
+	var wg sync.WaitGroup
+
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			results[idx], errs[idx] = service.ProcessPayment(ctx, req)
+		}(i)
+	}
+
+	wg.Wait()
+
+	for i, err := range errs {
+		require.NoError(t, err, "request %d failed", i)
+	}
+
+	firstID := results[0].PaymentID
+	for i, result := range results {
+		assert.Equal(t, firstID, result.PaymentID,
+			"request %d got different payment ID", i)
+	}
+
+	var count int
+	err := db.QueryRow(`SELECT COUNT(*) FROM payments WHERE idempotency_key = $1`,
+		req.IdempotencyKey).Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count, "should have exactly 1 payment in DB")
+}
+
+// TestDifferentKeysParallel — chaves diferentes processam em paralelo, sem bloquear
+func TestDifferentKeysParallel(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	service := NewPaymentService(db, 4)
+	ctx := context.Background()
+
+	results := make([]*PaymentResult, 10)
+	errs := make([]error, 10)
+	var wg sync.WaitGroup
+
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			req := &PaymentRequest{
+				IdempotencyKey: fmt.Sprintf("key-%d", idx),
+				UserID:         fmt.Sprintf("user-%d", idx),
+				Amount:         10000,
+				Currency:       "USD",
+			}
+			results[idx], errs[idx] = service.ProcessPayment(ctx, req)
+		}(i)
+	}
+
+	wg.Wait()
+
+	for i, err := range errs {
+		require.NoError(t, err, "request %d failed", i)
+	}
+
+	for i := 0; i < 10; i++ {
+		for j := i + 1; j < 10; j++ {
+			assert.NotEqual(t, results[i].PaymentID, results[j].PaymentID,
+				"different keys should create different payments")
+		}
+	}
+}
+```
+
+---
+
+### Dicas Chave
+
+**Hash para shard:**
+
+```go
+shard := hashKey(req.IdempotencyKey) % int64(len(ps.shards))
+```
+
+**SELECT + INSERT ON CONFLICT:**
+
+```sql
+-- Verifica se já existe
+SELECT id, status, stripe_charge_id FROM payments 
+WHERE idempotency_key = $1
+
+-- Se não, insere
+INSERT INTO payments (...) VALUES (...)
+ON CONFLICT (idempotency_key) DO NOTHING
+RETURNING id, status, stripe_charge_id
+
+-- Se conflict, SELECT novamente para pegar o resultado anterior
+```
