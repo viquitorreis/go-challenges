@@ -3503,7 +3503,7 @@ type OrderBook struct {
 
     // TODO: estrutura para bids ordenados (maior preço primeiro)
     // TODO: estrutura para asks ordenados (menor preço primeiro)
-    // TODO: índice de orderID → Order para cancelamento O(1)
+    // TODO: índice de orderID -> Order para cancelamento O(1)
 
     mu sync.Mutex
 }
@@ -3982,7 +3982,7 @@ func NewPaymentService(db *sql.DB, numShards int) *PaymentService {
 // Retorna o resultado (novo ou anterior se já processado)
 func (ps *PaymentService) ProcessPayment(ctx context.Context, req *PaymentRequest) (*PaymentResult, error) {
 	// TODO: 
-	// 1. hash(idempotencyKey) % numShards → shard index
+	// 1. hash(idempotencyKey) % numShards -> shard index
 	// 2. Enfileira requisição no shard via channel
 	// 3. Aguarda resultado do shard
 	panic("not implemented")
@@ -3994,7 +3994,7 @@ func (s *Shard) worker(db *sql.DB) {
 	// TODO:
 	// loop infinito: recebe task do s.reqCh
 	// para cada task:
-	//   1. SELECT * FROM payments WHERE idempotency_key = ? → já existe?
+	//   1. SELECT * FROM payments WHERE idempotency_key = ? -> já existe?
 	//      SIM: retorna resultado anterior
 	//      NÃO: continua
 	//   2. Processa pagamento (simula Stripe)
@@ -4263,3 +4263,722 @@ RETURNING id, status, stripe_charge_id
 
 -- Se conflict, SELECT novamente para pegar o resultado anterior
 ```
+
+## 14. Mining Pool with Stratum Protocol
+
+### O que é um Stratum?
+
+Stratum é o protocolo que mineradores de Bitcoin usam para se comunicam com mining pools.
+
+É tipo um **JSON-RCP sobre TCP** com delimitador de linha, ou seja, cada mensagem é um JSON em uma linha nova. É simples para implementar em 1 hora, útil para entender parsing, dispatch de mensagens, e concorrência.
+
+Uma pool age como um **servidor que distribui trabalho** (que são blocos para tentar minerar) e coleta **shares** (resultados parciais que provam se o minerador está trabalhando ou não).
+
+Analogia de produção: pensa numa pool como um load balancer que distribui jobs, e os mineradores como workers. O que vai deixar a pool interessante é que cada minerador tem uma **dificuldade diferente**, um minerador fraco recebe trabalho mais fácil de fazera, e a pool agrega o hashrate total.
+
+### As 3 mensagens principais do protocolo
+
+O Stratum simplificado que você vai implementar tem exatamente 3 tipos:
+
+```mining.subscribe``` - o minerador se conecta, bassicamente diz "quero trabalhar". A pool responde com o ID de sessão. Esse ID da sessão é o handshake.
+
+```mining.notify``` - a pool envia trabalho para o minerador. Vai conter o job ID, o bloco parcial, e a dificuldade alvo do trabalho. Isso é **server-push**, e não request-response, a pool manda quando quer.
+
+```mining.submit``` - o minerador encontrou uma share válida e envia de volta. A pool valida, registra o hashrate, e responde com sucesso ou rejeição.
+
+### Hashrate Marketplace vs Exchange
+
+Nesse desafio, deve implementar **dois modelos de negócio** diferentes para a pool:
+
+No **marketplace**: mineradores venden hashrate diretamente para compradores por um preço fixo por TH/s. É como a Amazon por exemplo, você lista seu produto, o comprador paga o preço pedido. Simples, não precisa de matching engine e order book.
+
+Na **exchange**: existe um order book real (geralmente por ação / asset). Aqui os compradores postam bids ("quero 100 TH/s por $0,05/TH/s"), os vendedores postam asks ("tenho 100 TH/s por $0.06/TH/s"), e o sistema faz o match quando os preços se cruzam. No challenge 11, implementamos um order book de uma exchange, o modelo mental aqui é o mesmo, mas aplicado a hashrate em vez de ativos financeiros.
+
+Diferença do design: no marketplace só precisamos de um ```map[minerID]hashrate``` com um RWMutex. Na exchange precisamos de um order book completo com price-time priority.
+
+Implemente os dois, e exponha usando uma interface comum.
+
+---
+
+### Pontos importantes dessa implementação
+
+1. Porque `bufio.Scanner` com SplitFunc para \n ao invés de `json.NewDecoder` diretamente?
+
+Por backpressure. O decoder lê ahead de forma muito agressiva, e pode consumir bytes da próxima mensagem, isso quebraria um protocolo framing-based.
+
+2. Por que a interface `HashrateMarket` ao invés de um type switch no **Server**?
+
+O Server nào deve saber nada sobre o modelo de negócio implementado. Podemos trocar a lógica de um Marketplace por Exchange em runtime sem tocar na camada TCP.
+
+3. Por quê goroutines separadas no BroadCastJob ao invés de fazer sequencial?
+
+Pode parecer meio óbvio (concorrência, mais rápido teoricamente). Porém, para ser mais específico, um minerador com buffer de rede cheio (lento, com lag, ou hostíl), não deveria bloquear os outros.
+
+---
+
+### Estrutura do projeto
+
+```go
+challenge14/
+├── main.go
+├── protocol/
+│   └── stratum.go      # tipos de mensagem e parsing
+├── pool/
+│   ├── server.go       # TCP server + connection handling
+│   ├── miner.go        # estado por conexão de minerador
+│   └── dispatcher.go   # distribui jobs para mineradores
+├── market/
+│   ├── marketplace.go  # modelo de preço fixo
+│   └── exchange.go     # order book de hashrate
+└── pool_test.go
+```
+
+**main.go**
+
+```go
+
+func main() {
+	mp := market.NewMarketplace(0.05)
+	server := pool.NewServer(":8080", mp)
+
+	go func() {
+		if err := server.Start(); err != nil {
+			log.Fatal(err)
+		}
+	}()
+
+	// dá tempo pro listener subir antes de conectar
+	time.Sleep(100 * time.Millisecond)
+
+	minerID := simulateMiner(":8080", "cgminer/4.10.0")
+	time.Sleep(2 * time.Second)
+	mp.Tick(1.0) // 1 h
+	fmt.Printf("Total hashrate: %.20f\n", mp.TotalHashrate())
+	fmt.Printf("Revenue %s: $%.64f\n", minerID, mp.Revenue(minerID))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	server.Shutdown(ctx)
+}
+
+// simulateMiner conecta via TCP real e envia as 3 mensagens do protocolo.
+// Isso testa o protocolo de ponta a ponta sem precisar de um minerador real.
+func simulateMiner(addr, userAgent string) string {
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		log.Printf("miner connect error: %v", err)
+		return ""
+	}
+	defer conn.Close()
+
+	// 1. Subscribe
+	sendJSON(conn, protocol.Message{
+		ID: func() *int {
+			num := rand.IntN(math.MaxInt)
+			return &num
+		}(),
+		Method: protocol.Subscribe,
+		Params: mustMarshal(protocol.SubscribeParams{
+			UserAgent: userAgent,
+		}),
+	})
+
+	// 2. le a response do servidor
+	scanner := bufio.NewScanner(conn)
+	scanner.Scan()
+
+	var resp protocol.Response
+	if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil {
+		log.Printf("miner response unmarshal error: %v", err)
+		return ""
+	}
+
+	log.Printf("miner received response: %+v", resp)
+
+	var result map[string]string
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		log.Printf("miner response result unmarshal error: %v", err)
+		return ""
+	}
+
+	// id real no mktplc
+	serverMinerID := result["session_id"]
+
+	// 3. Submit uma share (simulada — hash pode ser inválido para este exemplo)
+	sendJSON(conn, protocol.Message{
+		ID: func() *int {
+			num := rand.IntN(math.MaxInt)
+			return &num
+		}(),
+		Method: protocol.Submit,
+		Params: mustMarshal(protocol.SubmitParams{
+			MinerID: serverMinerID,
+			JobID:   "job-001",
+			Nonce:   42,
+			Hash:    "0000abcd1234", // leading zeros simulam dificuldade baixa
+		}),
+	})
+
+	// dá tempo pro servidor processar a share antes de fechar a conexão
+	time.Sleep(500 * time.Millisecond)
+
+	return serverMinerID
+}
+
+func mustMarshal(v any) json.RawMessage {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+func sendJSON(conn net.Conn, v any) {
+	b, _ := json.Marshal(v)
+	b = append(b, '\n') // Stratum usa newline como delimitador
+	conn.Write(b)
+}
+```
+
+**protocol/stratum.go**
+
+```go
+package protocol
+
+import (
+	"encoding/json"
+	"fmt"
+)
+
+// MessageType representa os 3 tipos de mensagem do Stratum simplificado.
+// Em produção (SlushPool, F2Pool) existem mais, mas esses 3 cobrem o core.
+type MessageType string
+
+const (
+	Subscribe MessageType = "mining.subscribe"
+	Notify    MessageType = "mining.notify"
+	Submit    MessageType = "mining.submit"
+)
+
+// Message é o envelope JSON que toda mensagem Stratum usa.
+// O campo Params é raw porque cada tipo de mensagem tem params diferentes —
+// você vai fazer unmarshal do params específico depois de conhecer o Method.
+type Message struct {
+	ID     *int            `json:"id"`     // nil para server-push (notify)
+	Method MessageType     `json:"method"`
+	Params json.RawMessage `json:"params"`
+}
+
+// Response é o que o server manda de volta para requests com ID.
+type Response struct {
+	ID     int             `json:"id"`
+	Result json.RawMessage `json:"result"`
+	Error  *RPCError       `json:"error"`
+}
+
+type RPCError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+// SubscribeParams são os params do mining.subscribe.
+type SubscribeParams struct {
+	UserAgent string `json:"user_agent"` // ex: "cgminer/4.10.0"
+	SessionID string `json:"session_id"` // vazio na primeira conexão
+}
+
+// NotifyParams são os params do mining.notify (server -> miner).
+type NotifyParams struct {
+	JobID      string `json:"job_id"`
+	PrevHash   string `json:"prev_hash"`
+	Difficulty uint64 `json:"difficulty"` // alvo simplificado: share válida se hash < target
+	CleanJobs  bool   `json:"clean_jobs"` // true = descarta jobs anteriores
+}
+
+// SubmitParams são os params do mining.submit (miner -> server).
+type SubmitParams struct {
+	MinerID string `json:"miner_id"`
+	JobID   string `json:"job_id"`
+	Nonce   uint64 `json:"nonce"`  // o minerador encontrou esse nonce
+	Hash    string `json:"hash"`   // sha256 do bloco com esse nonce
+}
+
+// Parse faz o dispatch do JSON cru para o tipo correto.
+// Retorna um dos tipos acima ou erro se o método for desconhecido.
+func Parse(data []byte) (*Message, error) {
+	// TODO: unmarshal em Message, validar Method
+	return nil, fmt.Errorf("not implemented")
+}
+
+// ValidateShare verifica se o hash submetido satisfaz a dificuldade do job.
+// Simplificação: conta leading zeros no hash (hex string).
+// Em Bitcoin real, compara com um target de 256 bits.
+func ValidateShare(hash string, difficulty uint64) bool {
+	// TODO: implementar validação simplificada
+	return false
+}
+```
+
+**pool/miner.go**
+
+```go
+package pool
+
+import (
+	"bufio"
+	"net"
+	"sync"
+	"time"
+)
+
+// MinerState representa o estado de um minerador conectado.
+// Cada conexão TCP tem exatamente um MinerState.
+type MinerState struct {
+	mu sync.RWMutex
+
+	ID        string
+	Conn      net.Conn
+	Writer    *bufio.Writer // buffered para não fazer syscall por mensagem
+	SessionID string
+
+	// Hashrate tracking: usamos uma janela deslizante de 60s.
+	// shares aceitas nos últimos 60s * dificuldade média = hashrate estimado.
+	ShareWindow []shareEntry
+	Difficulty  uint64 // dificuldade atual atribuída a esse minerador
+
+	CurrentJobID string
+	ConnectedAt  time.Time
+	LastShareAt  time.Time
+}
+
+type shareEntry struct {
+	At         time.Time
+	Difficulty uint64
+}
+
+// HashrateTHs retorna o hashrate estimado em TH/s nos últimos windowSec segundos.
+// Fórmula: sum(difficulty_of_each_share) / window_seconds / 1e12
+func (m *MinerState) HashrateTHs(windowSec int) float64 {
+	// TODO: filtrar shares dentro da janela, somar dificuldades, dividir
+	return 0
+}
+
+// SendMessage serializa e envia uma mensagem para o minerador.
+// Usa bufio.Writer — precisa de Flush() depois ou o dado fica no buffer.
+func (m *MinerState) SendMessage(v any) error {
+	// TODO: json.Marshal, Write, '\n', Flush
+	// Lembra: o Writer não é thread-safe sozinho — o mu protege
+	return nil
+}
+```
+
+**pool/server.go**
+
+```go
+package pool
+
+import (
+	"bufio"
+	"context"
+	"log"
+	"net"
+	"sync"
+)
+
+// Server é o TCP server da mining pool.
+// Aceita conexões de mineradores, faz parsing das mensagens Stratum,
+// e despacha para os handlers corretos.
+type Server struct {
+	addr     string
+	listener net.Listener
+
+	mu     sync.RWMutex
+	miners map[string]*MinerState // minerID -> estado
+
+	dispatcher *Dispatcher
+	market     HashrateMarket // interface — pode ser Marketplace ou Exchange
+
+	wg  sync.WaitGroup
+	ctx context.Context
+	cancel context.CancelFunc
+}
+
+// HashrateMarket é a interface comum entre Marketplace e Exchange.
+// Isso permite que o Server não saiba qual modelo está usando.
+type HashrateMarket interface {
+	RegisterMiner(minerID string, hashrateTHs float64) error
+	UnregisterMiner(minerID string)
+	TotalHashrate() float64
+	Revenue(minerID string) float64 // quanto esse minerador ganhou
+}
+
+func NewServer(addr string, market HashrateMarket) *Server {
+	// TODO
+	return nil
+}
+
+func (s *Server) Start() error {
+	// TODO: net.Listen, loop de Accept, goroutine por conexão
+	return nil
+}
+
+func (s *Server) handleConn(conn net.Conn) {
+	// TODO: criar MinerState, bufio.Scanner com SplitFunc de newline,
+	// loop de leitura, dispatch para handleMessage
+}
+
+func (s *Server) handleMessage(miner *MinerState, data []byte) {
+	// TODO: protocol.Parse, switch em msg.Method:
+	//   Subscribe -> gera SessionID, registra miner, envia response
+	//   Submit    -> valida share, atualiza hashrate, responde
+	//   Notify    -> mineradores não mandam notify, retornar erro
+}
+
+func (s *Server) Shutdown(ctx context.Context) error {
+	// TODO: fechar listener, cancelar context, aguardar wg com timeout
+	return nil
+}
+
+// BroadcastJob envia um novo job para todos os mineradores conectados.
+// Chamado pelo Dispatcher quando um novo bloco chega.
+func (s *Server) BroadcastJob(job *protocol.NotifyParams) {
+	// TODO: RLock miners, iterar, SendMessage em goroutines separadas
+	// por que goroutines separadas aqui? pensa em um minerador lento...
+}
+
+func (s *Server) Addr() string {
+	// TODO: retornar listener addr
+}
+```
+
+**market/marketplace.go**
+
+```go
+package market
+
+import (
+	"fmt"
+	"sync"
+)
+
+// Marketplace implementa HashrateMarket com modelo de preço fixo.
+// Mineradores registram hashrate, recebem pagamento proporcional ao total.
+// É o modelo mais simples: sem order book, sem matching.
+type Marketplace struct {
+	mu sync.RWMutex
+
+	pricePerTH float64 // USD por TH/s por hora
+	miners     map[string]*minerRecord
+}
+
+type minerRecord struct {
+	HashrateTHs float64
+	EarnedUSD   float64
+}
+
+func NewMarketplace(pricePerTH float64) *Marketplace {
+	// TODO
+	return nil
+}
+
+func (m *Marketplace) RegisterMiner(minerID string, hashrateTHs float64) error {
+	// TODO
+	return nil
+}
+
+func (m *Marketplace) UnregisterMiner(minerID string) {
+	// TODO
+}
+
+func (m *Marketplace) TotalHashrate() float64 {
+	// TODO: RLock, somar hashrates
+	return 0
+}
+
+func (m *Marketplace) Revenue(minerID string) float64 {
+	// TODO
+	return 0
+}
+
+// Tick é chamado periodicamente (ex: a cada minuto) para calcular e distribuir revenue.
+// Revenue de cada minerador = (seu hashrate / total hashrate) * pricePerTH * totalHashrate * (1/60 hora)
+func (m *Marketplace) Tick(durationHours float64) {
+	// TODO: Lock, calcular proporção de cada minerador, atualizar EarnedUSD
+}
+```
+
+**market/exchange.go**
+
+```go
+package market
+
+import (
+	"sync"
+	"time"
+)
+
+// Order representa uma oferta no order book de hashrate.
+type Order struct {
+	ID          string
+	MinerID     string    // quem está vendendo hashrate
+	HashrateTHs float64   // quantidade ofertada
+	PricePerTH  float64   // preço pedido (ask) ou máximo (bid)
+	Side        OrderSide
+	Cancelled   bool
+	CreatedAt   time.Time
+}
+
+type OrderSide int
+
+const (
+	Bid OrderSide = iota // comprador: "quero comprar X TH/s por até $Y"
+	Ask                  // vendedor (minerador): "tenho X TH/s por $Y"
+)
+
+// Exchange implementa HashrateMarket com order book.
+// A lógica de matching é price-time priority, igual ao Challenge 11,
+// mas aqui o "ativo" é hashrate em vez de um par de moedas.
+type Exchange struct {
+	mu sync.Mutex
+
+	asks   *askHeap // sorted by price ascending  (vendedores mais baratos primeiro)
+	bids   *bidHeap // sorted by price descending (compradores que pagam mais primeiro)
+
+	orders map[string]*Order // orderID -> order (lookup rápido para UnregisterMiner)
+	revenue  map[string]float64 // minerID -> USD acumulado
+}
+
+func NewExchange() *Exchange {
+	// TODO
+	return nil
+}
+
+// PlaceOrder adiciona um bid ou ask no order book e tenta fazer matching.
+func (e *Exchange) PlaceOrder(order *Order) error {
+	// TODO: adicionar no lado correto, chamar tryMatch
+	return nil
+}
+
+func (e *Exchange) tryMatch() {
+	// TODO: enquanto melhor ask <= melhor bid, fazer match e distribuir revenue
+	// Dica: pensa no que você fez no Challenge 11 — a lógica é a mesma,
+	// só muda o que você está "comprando"
+}
+
+// RegisterMiner no contexto da exchange significa: colocar um Ask automaticamente.
+func (e *Exchange) RegisterMiner(minerID string, hashrateTHs float64) error {
+	// TODO: criar um Ask com preço padrão e chamar PlaceOrder
+	return nil
+}
+
+func (e *Exchange) UnregisterMiner(minerID string) {
+	// TODO: remover asks pendentes desse minerador
+}
+
+func (e *Exchange) TotalHashrate() float64 {
+	// TODO
+	return 0
+}
+
+func (e *Exchange) Revenue(minerID string) float64 {
+	// TODO
+	return 0
+}
+```
+
+**pool_test.go**
+
+```go
+package main_test
+
+import (
+	"context"
+	"sync"
+	"testing"
+	"time"
+
+	"miningpool/market"
+	"miningpool/pool"
+	"miningpool/protocol"
+)
+
+// TestConcurrentMiners garante que 50 mineradores conectando simultaneamente
+// não causam race conditions no mapa de miners.
+// Roda com: go test -race ./...
+func TestConcurrentMiners(t *testing.T) {
+	mp := market.NewMarketplace(0.05)
+	srv := pool.NewServer(":0", mp) // porta 0 = OS escolhe porta livre
+
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Shutdown(context.Background())
+
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			// TODO: conectar, enviar Subscribe, verificar response
+		}(i)
+	}
+	wg.Wait()
+}
+
+// TestShareValidation testa a validação de shares sem TCP.
+func TestShareValidation(t *testing.T) {
+	tests := []struct {
+		hash       string
+		difficulty uint64
+		valid      bool
+	}{
+		{"0000abcd1234", 4, true},  // 4 leading zeros
+		{"000abcd1234f", 4, false}, // só 3 leading zeros
+		{"0000000012ab", 7, true},  // 7 leading zeros
+	}
+
+	for _, tc := range tests {
+		got := protocol.ValidateShare(tc.hash, tc.difficulty)
+		if got != tc.valid {
+			t.Errorf("ValidateShare(%q, %d) = %v, want %v",
+				tc.hash, tc.difficulty, got, tc.valid)
+		}
+	}
+}
+
+// TestMarketplaceTick verifica distribuição proporcional de revenue.
+func TestMarketplaceTick(t *testing.T) {
+	mp := market.NewMarketplace(1.0) // $1/TH/s para math simples
+
+	mp.RegisterMiner("alice", 100) // alice tem 100 TH/s
+	mp.RegisterMiner("bob", 300)   // bob tem 300 TH/s — 3x mais
+
+	mp.Tick(1.0) // simula 1 hora
+
+	// alice deve ter 25% do revenue total (100/400 * 1.0 * 400 = 100)
+	// bob deve ter 75% do revenue total
+	aliceRev := mp.Revenue("alice")
+	bobRev := mp.Revenue("bob")
+
+	if bobRev/aliceRev < 2.9 || bobRev/aliceRev > 3.1 {
+		t.Errorf("proporção incorreta: alice=%.2f, bob=%.2f, ratio=%.2f",
+			aliceRev, bobRev, bobRev/aliceRev)
+	}
+}
+
+// TestBroadcastNoDeadlock garante que BroadcastJob não causa deadlock
+// quando um minerador lento bloqueia.
+func TestBroadcastNoDeadlock(t *testing.T) {
+	// TODO: criar server com um minerador "lento" (buffer cheio),
+	// chamar BroadcastJob, verificar que completa em < 1s
+	done := make(chan struct{})
+	go func() {
+		// TODO: chamar BroadcastJob aqui
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// ok
+	case <-time.After(1 * time.Second):
+		t.Fatal("BroadcastJob deadlocked com minerador lento")
+	}
+}
+
+// TestExchangeMatching verifica que bids e asks fazem match corretamente.
+func TestExchangeMatching(t *testing.T) {
+	ex := market.NewExchange()
+
+	// Bob quer comprar 100 TH/s por até $0.06
+	ex.PlaceOrder(&market.Order{
+		ID:          "bid-1",
+		MinerID:     "buyer-bob",
+		HashrateTHs: 100,
+		PricePerTH:  0.06,
+		Side:        market.Bid,
+	})
+
+	// Alice tem 100 TH/s e aceita $0.05
+	ex.PlaceOrder(&market.Order{
+		ID:          "ask-1",
+		MinerID:     "alice",
+		HashrateTHs: 100,
+		PricePerTH:  0.05,
+		Side:        market.Ask,
+	})
+
+	// Deve ter feito match — alice deve ter revenue > 0
+	if ex.Revenue("alice") == 0 {
+		t.Error("match não aconteceu: alice não recebeu revenue")
+	}
+}
+```
+
+**pool/dispatcher.go**
+
+```go
+package pool
+
+import (
+    "context"
+    "fmt"
+    "math/rand"
+    "time"
+    
+    "challenge13/protocol"
+)
+
+// Dispatcher é responsável por gerar jobs de mineração e distribuí-los
+// para todos os mineradores conectados via BroadcastJob do servidor.
+// Ele é intencionalmente burro sobre o protocolo TCP — só conhece jobs.
+type Dispatcher struct {
+    server   *Server       // referência para chamar BroadcastJob
+    interval time.Duration // intervalo entre novos jobs
+    
+    // currentDifficulty simula ajuste dinâmico de dificuldade.
+    // Em Bitcoin real, a dificuldade é ajustada a cada 2016 blocos.
+    currentDifficulty uint64
+}
+
+func NewDispatcher(server *Server, interval time.Duration, initialDifficulty uint64) *Dispatcher {
+    return &Dispatcher{
+        server:            server,
+        interval:          interval,
+        currentDifficulty: initialDifficulty,
+    }
+}
+
+// Run inicia o loop do dispatcher. Deve ser chamado em uma goroutine separada.
+// Para quando o context for cancelado — usa o mesmo padrão de shutdown do servidor.
+func (d *Dispatcher) Run(ctx context.Context) {
+    ticker := time.NewTicker(d.interval)
+    defer ticker.Stop()
+
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-ticker.C:
+            job := d.generateJob()
+            d.server.BroadcastJob(job)
+        }
+    }
+}
+
+// generateJob cria um novo job de mineração com um JobID único e
+// um PrevHash simulado. Em produção isso viria do nó Bitcoin completo.
+func (d *Dispatcher) generateJob() *protocol.NotifyParams {
+    return &protocol.NotifyParams{
+        JobID:      fmt.Sprintf("job-%d", time.Now().UnixNano()),
+        PrevHash:   fmt.Sprintf("%064x", rand.Uint64()), // hash simulado de 64 chars hex
+        Difficulty: d.currentDifficulty,
+        CleanJobs:  true, // descarta jobs anteriores — novo bloco chegou
+    }
+}
+```
+
+### Dicas
+
+Começa pelo protocolo, `protocol/stratum.go`. Sempre começa pelo protocolo quando tem um challenge com comunicação estruturada. O motivo é que o protocolo é o contrato entre todas as outras partes. Se implementar o TCP server primeiro sem saber como é feito o parse das mensagens, não faz muito sentido.
+
+Ordem que faz sentido: protocolo -> estrutura de dados de mercado (Marketplace primeiro, Exchange depois) -> servidor TCP -> integração na main.
