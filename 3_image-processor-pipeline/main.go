@@ -62,8 +62,6 @@ type ImageJob struct {
 type Pipeline struct {
 	inputDir  string
 	outputDir string
-
-	wg sync.WaitGroup
 }
 
 func NewPipeline(inputDir, outputDir string) *Pipeline {
@@ -81,7 +79,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 
 	wg.Go(func() {
-		p.generator(context.Background(), fileChan) // primeiro escrevemos no filechan
+		p.generator(ctx, fileChan) // primeiro escrevemos no filechan
 	})
 
 	wg.Go(func() {
