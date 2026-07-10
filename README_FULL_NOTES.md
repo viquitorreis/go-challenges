@@ -1310,7 +1310,7 @@ Em Shutdown(): depois de setar flag, chame cond.Broadcast() (acorda todos).
 3. Métricas?
 Adicione campos int para enqueued, processed, dropped. Útil para debugging e produção real.
 
-```
+```go
 package main
 
 import (
@@ -1546,7 +1546,6 @@ func (wp *WorkerPool) Shutdown() {
 func (wp *WorkerPool) Stats() (enqueued, processed, dropped, queueSize int) {
 	return wp.queue.Stats()
 }
-
 ```
 testes:
 

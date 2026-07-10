@@ -7,6 +7,16 @@ I built these for myself because I couldn't find resources that went beyond "her
  
 Each challenge includes a problem statement, a starting skeleton with TODOs, and a test suite (most runnable with `go test -race`). Pick one, implement it, and run the tests. If you write up your solution or learnings, feel free to share happy to see how others approached the same problems.
 
+## Why this exists
+
+Most Go concurrency resources stop at "here's how goroutines and channels
+work." There wasn't much available that pushed into the trade-offs that
+matter in production: lock granularity, backpressure, graceful shutdown
+ordering, idempotency under concurrent retries, consensus. This repo is the
+curriculum I built for myself to close that gap - one problem at a time,
+each with a clear set of learnings and a test suite that enforces correctness
+with `-race`.
+
 ## Challenges
  
 | # | Challenge | Core concepts |
@@ -26,13 +36,4 @@ Each challenge includes a problem statement, a starting skeleton with TODOs, and
 | 13 | [Idempotent Payment Processing (PostgreSQL)](./13_idempotent_payment_processing_postgresql) - [problem statement](./README_FULL_NOTES.md#13-idempotent-payment-processing-with-postgresql) | Sharded idempotency keys, `ON CONFLICT DO NOTHING`, concurrent dedup |
 | 14 | [Mining Pool with Stratum Protocol](./14_mining_pool_with_stratum_protocol) - [problem statement](./README_FULL_NOTES.md#14-mining-pool-with-stratum-protocol) | JSON-RPC over TCP, marketplace vs. order-book pricing models |
 | 15 | [Raft Leader Election](./15_raft_leader_election) - [problem statement](./README_FULL_NOTES.md#15-raft-leader-election) | Raft consensus, terms, randomized election timeouts, heartbeats |
- 
-## Why this exists
 
-Most Go concurrency resources stop at "here's how goroutines and channels
-work." There wasn't much available that pushed into the trade-offs that
-matter in production: lock granularity, backpressure, graceful shutdown
-ordering, idempotency under concurrent retries, consensus. This repo is the
-curriculum I built for myself to close that gap - one problem at a time,
-each with a clear set of learnings and a test suite that enforces correctness
-with `-race`.
