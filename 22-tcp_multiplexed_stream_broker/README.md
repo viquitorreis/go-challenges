@@ -3,6 +3,14 @@
 **Categoria**: Streaming + Concorrência (raw)
 **Tempo**: 2h (15min teoria + ~1h45 challenge)
 
+Resumo do que irá aprender nesse challenge:
+
+- TCP raw com framing length-prefixed manual (sem lib pronta)
+- Broker centralizado com goroutine única + channels (register/unregister/broadcast)
+- Multiplexação por topic
+- Read/write pumps separados por conexão
+- Slow consumer handling ficou de bônus se quiser voltar depois
+
 ## Estudo antes (15 min)
 
 Foco: **length-prefixed framing** sobre TCP.
