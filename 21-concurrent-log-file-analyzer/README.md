@@ -1,52 +1,37 @@
-# Challenge - Log File Analyzer Concorrente (35-40min)
+# Concurrent Log File Analyzer
 
-## Task
+🇧🇷 [Versão em Português](README.pt-br.md)
 
-Processar um arquivo de log grande, contando erros por categoria, usando leitura sequencial + processamento concorrente.
+**Category:** Concurrency / I/O
+**Estimated time:** ~35-40 minutes
 
-### Formato do arquivo (access.log)
+## What it is
 
+A log file analyzer that reads a (potentially large) log file line by line and counts entries per level (INFO/WARN/ERROR), using one sequential reader, N parsing workers, and one aggregator goroutine.
+
+## What you'll learn
+
+- Why reading a text file is inherently sequential (you can't jump into the middle of a file without already knowing where lines start), while per-line parsing is exactly where concurrency adds value once the per-line work gets expensive.
+- The reader -> N workers -> 1 aggregator shape as a general template for line-oriented log/data processing without loading the whole file into memory.
+- Why a single aggregator goroutine writing to a `map[string]int` avoids needing a mutex on that map, even though multiple workers are producing results concurrently.
+
+## What's implemented
+
+- `AnalyzeLog(filename string, numWorkers int) (map[string]int, error)` as the public entry point.
+- A single goroutine reading the file with `bufio.Scanner`, sending each line into a jobs channel.
+- `extractLevel(bt []byte) string` parsing the level out of a line (text between `[` and `]`).
+- `numWorkers` workers consuming lines and parsing them concurrently.
+- A single aggregating goroutine collecting parsed results into the final `map[string]int`.
+- `createLogs()` for generating a sample `access.log` file to test against.
+- Malformed lines (missing the expected `[LEVEL]` format) are skipped rather than crashing the program.
+
+## Design decisions
+
+- Only one goroutine ever writes to the result map, which is what makes it safe without a mutex, the concurrency is pushed into the parsing stage, not the aggregation stage.
+- Channels are closed in a specific order: the reader closes the jobs channel when the file ends, and the workers close the results channel (via a `WaitGroup`) once every worker has finished, not before.
+
+## How to run
+
+```bash
+go run .
 ```
-2026-06-17 10:00:01 [INFO] request completed
-2026-06-17 10:00:02 [ERROR] database timeout
-2026-06-17 10:00:03 [WARN] high memory usage
-2026-06-17 10:00:04 [ERROR] connection refused
-2026-06-17 10:00:05 [INFO] request completed
-```
-
-### Requisitos
-
-```
-go
-type LineResult struct {
-    Level string // INFO, WARN, ERROR
-    Count int
-}
-
-func AnalyzeLog(filename string, numWorkers int) (map[string]int, error)
-```
-
-- 1 goroutine lê o arquivo sequencialmente (bufio.Scanner, linha por linha - nunca carrega tudo na memória)
-- Cada linha lida é mandada pra um channel de jobs
-- N workers consomem desse channel, fazem o parsing (extrair o nível: INFO/WARN/ERROR) e mandam o resultado pra um channel de resultados
-- 1 goroutine agregadora consome os resultados e popula o map[string]int final (contagem por nível)
-- Retorna o mapa final: {"INFO": 2, "WARN": 1, "ERROR": 2}
-
-### Por que isso é interessante (responde sua pergunta)
-
-- A leitura é inerentemente sequencial (você não pode "pular" no meio de um arquivo texto sem saber onde as linhas começam)
-- O paralelismo ganha valor quando o parsing/processamento de cada linha é caro (regex complexo, chamada de API, agregação pesada) - não na leitura em si, que já é rápida e é gargalo de I/O, não de CPU
-- Pra esse exercício, o processamento é simples (extrair string entre [ e ]), mas a estrutura é a mesma que você usaria se fosse algo pesado
-
-### Regras
-
-- Crie um arquivo de teste com ~20-30 linhas (pode gerar via código ou escrever um .log manualmen­te)
-- Se uma linha não tiver o formato esperado, ignora (não quebra o programa)
-map[string]int final precisa ser thread-safe na agregação (você só tem 1 goroutine agregando, mas pense em por que isso evita precisar de mutex)
-
-### O que será avaliado
-
-- Separação correta: 1 reader sequencial, N workers paralelos, 1 aggregator
-- Fechamento de channels na ordem certa (reader fecha jobsCh quando termina; workers fecham resultsCh via WaitGroup quando terminam)
-- Sem necessidade de mutex no map final (porque só 1 goroutine escreve nele - pensa em por que essa escolha de design evita lock)
-- Tratamento de linha malformada sem crash

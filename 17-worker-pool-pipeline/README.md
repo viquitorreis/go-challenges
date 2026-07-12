@@ -1,83 +1,33 @@
-# Worker Pool + Pipeline - 40min
+# Worker Pool + Pipeline (Log Processing)
 
-## Task: Log Processing Pipeline with Rate-Limited Output
+🇧🇷 [Versão em Português](README.pt-br.md)
 
-Simula um sistema que processa logs de múltiplas fontes, filtra erros, e envia para um "sink" rate-limited (ex: API externa com limite de requests/seg).
+**Category:** Concurrency / Pipeline
+**Estimated time:** ~40 minutes
 
-### Pipeline (3 stages)
+## What it is
 
-Generator -> Filter (workers) -> Rate-Limited Sink
+A 3-stage pipeline simulating log processing: generate mock log entries, filter down to errors using a worker pool, then push them through a rate-limited sink (like an external API with a requests/second limit).
 
-### Tipos
+## What you'll learn
 
-```go
-type LogEntry struct {
-    Source    string
-    Level     string // "info", "warn", "error"
-    Message   string
-    Timestamp time.Time
-}
+- Combining a **pipeline** (sequential stages) with a **worker pool inside one stage** (fan-out for filtering, fan-in back into a single channel).
+- The trickiest part of a fan-in stage: multiple workers writing to the same output channel, and making sure it's only closed after every single worker has finished, not after the first one.
+- Rate limiting an output stage with `time.Ticker`/`time.Sleep` while still respecting `context` cancellation.
 
-type SinkResult struct {
-    Entry    LogEntry
-    SentAt   time.Time
-    Err      error
-}
+## What's implemented
+
+- `generateLogs(ctx context.Context, n int) <-chan LogEntry` producing `n` mock entries with randomized levels, respecting `ctx.Done()`.
+- `filterErrors(ctx context.Context, in <-chan LogEntry, numWorkers int) <-chan LogEntry` running `numWorkers` filtering goroutines that fan their output back into a single channel.
+- `sink(ctx context.Context, in <-chan LogEntry, ratePerSecond int) <-chan SinkResult` processing at most `ratePerSecond` items per second and returning results on another channel.
+
+## Design decisions
+
+- The fan-in channel from `filterErrors` is closed by a coordinating goroutine that waits on a `sync.WaitGroup` for all filter workers, not by any individual worker, avoiding a "send on closed channel" panic.
+- `context` is threaded through all three stage functions so cancellation stops the pipeline at any point, not just at the generator.
+
+## How to run
+
+```bash
+go run .
 ```
-
-### Requisitos
-
-**Stage 1 - Generator**
-
-```go
-func generateLogs(ctx context.Context, n int) <-chan LogEntry
-```
-
-- Gera 'n' logs mockados, niveis aleatorios (info/warn/error), em uma goroutine
-- Respeita `ctx.Done()`
-
-**Stage 2** - Filter (worker pool)
-
-```go
-func filterErrors(ctx context.Context, in <-chan LogEntry, numWorkers int) <-chan LogEntry
-```
-
-**Stage 3** - Rate-Limited Sink
-
-```go
-func sink(ctx context.Context, in <-chan LogEntry, ratePerSecond int) <-chan SinkResult
-```
-
-- Processa no máximo ratePerSecond itens por segundo (use time.Ticker ou time.Sleep)
-- Mock de "envio": time.Sleep(10*time.Millisecond), sempre sucesso
-- Retorna resultados em outro channel
-
-**main**
-
-```go
-func main() {
-    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-    defer cancel()
-
-    logsCh := generateLogs(ctx, 50)
-    errorsCh := filterErrors(ctx, logsCh, 4)
-    resultsCh := sink(ctx, errorsCh, 5) // 5/sec
-
-    count := 0
-    for res := range resultsCh {
-        fmt.Println(res)
-        count++
-    }
-    fmt.Println("total processed:", count)
-}
-```
-
-**O que será avaliado**
-
-- Fan-in correto (múltiplos workers -> 1 channel, sem fechar prematuramente)
-- Rate limiting funcional (medir tempo total: ~deve bater com errors_count / ratePerSecond)
-- Propagação de ctx em todos os 3 estágios
-- Fechamento correto de channels em cadeia (cada stage fecha seu próprio output quando termina)
-- Sem deadlock, sem goroutine leak
-
-**Twist proposital**: o fan-in do stage 2 é o ponto mais fácil de errar **múltiplos workers escrevendo no mesmo channel**, e alguém precisa fechar esse channel só depois que TODOS os workers terminarem (já viu esse padrão antes, hoje mesmo).

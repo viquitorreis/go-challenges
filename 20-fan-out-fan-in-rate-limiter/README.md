@@ -1,34 +1,32 @@
-# Challenge - Fan-out/Fan-in com Rate Limiter (30min)
+# Fan-out/Fan-in Rate Limiter
 
-## Task: Concurrent API Request Simulator
+🇧🇷 [Versão em Português](README.pt-br.md)
 
-Você tem 20 "requests" pra processar. Precisa: (1) processar com fan-out de N workers, (2) aplicar um rate limiter de R requests/segundo globalmente (não por worker - global), (3) fan-in os resultados num único channel.
+**Category:** Concurrency
+**Estimated time:** ~30 minutes
 
+## What it is
+
+A simulated concurrent API request processor: N worker goroutines process requests in parallel (fan-out), but all of them share a single global rate limit, and their results converge back into one channel (fan-in).
+
+## What you'll learn
+
+- The distinction between a **per-worker** rate limit and a **global** rate limit shared across all workers, and why a shared `time.Ticker` is what makes the limit actually global.
+- Combining fan-out (multiple workers pulling from a shared job source) with fan-in (all results converging into one channel) in a single function.
+
+## What's implemented
+
+- `ProcessRequests(requests []Request, numWorkers int, ratePerSecond int) []Result` as the single public entry point.
+- `numWorkers` workers processing requests concurrently, gated by one shared rate limiter (not one limiter per worker).
+- Mocked processing (`time.Sleep(50ms)`, always succeeds) so the focus stays on the concurrency pattern rather than real I/O.
+
+## Design decisions
+
+- The rate limiter is a single shared `time.Ticker` (or equivalent) that every worker reads from before processing a request, rather than each worker having its own ticker, which is what makes the limit global instead of `numWorkers * ratePerSecond`.
+- Fan-in and fan-out are combined in one function rather than split across separate exported helpers, since the challenge's scope is this specific combined pattern.
+
+## How to run
+
+```bash
+go run .
 ```
-go
-type Request struct {
-    ID int
-}
-
-type Result struct {
-    RequestID int
-    Success   bool
-    Duration  time.Duration
-}
-
-func ProcessRequests(requests []Request, numWorkers int, ratePerSecond int) []Result
-```
-
-### Regras
-
-- numWorkers workers em paralelo (fan-out)
-- Rate limiter global - mesmo com 5 workers, não pode passar de ratePerSecond requests/segundo no total (use time.Ticker compartilhado entre os workers)
-- Mock de processamento: time.Sleep(50 * time.Millisecond), sempre sucesso
-- Todos os resultados convergem num único channel (fan-in), depois coletados num slice
-- Sem deadlock, sem goroutine leak, todos os 20 requests processados
-
-**O que será avaliado*8
-
-- Ticker compartilhado entre múltiplos workers sem corrida de dados
-- Fan-out + fan-in combinados corretamente
-- Fechar channels na ordem certa

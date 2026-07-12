@@ -1,10 +1,5 @@
 ## Overview
 
-### Challenges
-
-- 1. Event Bus
-- 2. Log Aggregator (Fan-in)
-
 ## 1. Event Bus
 
 ### Aprendizados desse challenge:
@@ -1549,7 +1544,7 @@ func (wp *WorkerPool) Stats() (enqueued, processed, dropped, queueSize int) {
 ```
 testes:
 
-```
+```go
 package main
 
 import (
@@ -3163,7 +3158,8 @@ func TestConcurrentDeletes(t *testing.T) {
 ## Dicas Chave (sem entregar a solução)
 
 **Update array pattern** — o coração do Insert e Delete:
-```
+
+```go
 update := make([]*SkipListNode, sl.maxLevel)
 curr := sl.head
 for i := sl.level - 1; i >= 0; i-- {
@@ -3176,7 +3172,8 @@ for i := sl.level - 1; i >= 0; i-- {
 ```
 
 **randomLevel:**
-```
+
+```go
 level := 1
 for level < sl.maxLevel && sl.rng.Float64() < sl.p {
     level++

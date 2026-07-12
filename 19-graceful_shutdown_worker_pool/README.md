@@ -1,90 +1,34 @@
-# Challenge - Graceful Shutdown com Worker Pool (45min)
+# Graceful Shutdown Worker Pool
 
-Worker pool com graceful shutdown - sem http.Server.Shutdown() que faz tudo por você. Você implementa o drain manualmente.
+🇧🇷 [Versão em Português](README.pt-br.md)
 
-# Task
+**Category:** Concurrency
+**Estimated time:** ~45 minutes
 
-Um sistema que processa jobs de uma fila continuamente. Quando recebe SIGTERM/SIGINT:
+## What it is
 
-- Para de aceitar jobs novos
-- Termina os jobs em andamento (não mata no meio)
-- Loga o progresso do shutdown
-- Sai limpo
+A worker pool that processes jobs from a queue continuously and, on `SIGTERM`/`SIGINT`, stops accepting new jobs, finishes the jobs already in flight, and exits cleanly, all without relying on a framework like `http.Server.Shutdown()` to do the draining for you.
 
-```go
-type Job struct {
-    ID      int
-    Payload string
-}
+## What you'll learn
 
-type WorkerPool struct {
-    // você decide
-}
+- Implementing graceful shutdown by hand: stop accepting new work, let in-flight work finish, then exit, in that specific order.
+- Coordinating shutdown across multiple worker goroutines with `context` cancellation and a `sync.WaitGroup`.
 
-func NewWorkerPool(numWorkers int) *WorkerPool
-func (wp *WorkerPool) Submit(job Job) error // retorna erro se shutdown iniciado
-func (wp *WorkerPool) Shutdown()             // drain + espera workers terminarem
-func (wp *WorkerPool) Start(ctx context.Context)
+## What's implemented
+
+- `NewWorkerPool(numWorkers int) *WorkerPool`.
+- `Start(ctx context.Context)` launching the worker goroutines.
+- `Submit(job Job) error` for enqueueing new jobs.
+- `Shutdown()` draining in-flight jobs before returning.
+
+## Design decisions
+
+- Shutdown is manual (no `http.Server.Shutdown()` shortcut available here, since this isn't an HTTP server): `Shutdown()` explicitly stops intake first and only then waits for workers to drain their current job.
+
+## How to run
+
+```bash
+go run ./1
 ```
 
-## Comportamento esperado
-
-```
-2026/06/24 13:40:00 worker pool started with 3 workers
-2026/06/24 13:40:01 job 1 started (worker 2)
-2026/06/24 13:40:01 job 2 started (worker 1)
-2026/06/24 13:40:01 job 3 started (worker 3)
-^C
-2026/06/24 13:40:02 shutdown signal received
-2026/06/24 13:40:02 no new jobs accepted
-2026/06/24 13:40:03 job 1 finished
-2026/06/24 13:40:03 job 3 finished
-2026/06/24 13:40:03 job 2 finished
-2026/06/24 13:40:03 shutdown complete
-```
-
-## Main
-
-```go
-func main() {
-    pool := NewWorkerPool(3)
-    ctx, cancel := context.WithCancel(context.Background())
-    defer cancel()
-
-    pool.Start(ctx)
-
-    // simula jobs chegando continuamente
-    go func() {
-        for i := 1; i <= 20; i++ {
-            err := pool.Submit(Job{ID: i, Payload: fmt.Sprintf("task-%d", i)})
-            if err != nil {
-                log.Printf("job %d rejected: %v", i, err)
-                break
-            }
-            time.Sleep(300 * time.Millisecond)
-        }
-    }()
-
-    // graceful shutdown no sinal
-    sigCh := make(chan os.Signal, 1)
-    signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-    <-sigCh
-    log.Println("shutdown signal received")
-    pool.Shutdown()
-    log.Println("shutdown complete")
-}
-```
-
-## Requisitos
-
-- Submit retorna errors.New("pool is shutting down") se Shutdown já foi chamado
-- Shutdown fecha o jobs channel (para de aceitar novos), espera todos os workers terminarem os jobs em andamento via WaitGroup
-- Workers processam jobs com time.Sleep(1 * time.Second) (mock de trabalho real)
-- Sem panic de "send on closed channel" se Submit e Shutdown rodarem concorrentemente ctx propagado pros workers - se o context cancelar, workers param de pegar novos jobs mas terminam o job atual antes de sair
-
-## O que será avaliado
-
-- Submit thread-safe contra Shutdown concorrente (como evitar send em channel fechado?)
-- Drain correto: close(jobsCh) + wg.Wait()
-- Workers que terminam o job atual antes de responder ao cancelamento
-- sync.Once pra garantir que Shutdown só executa uma vez mesmo se chamado múltiplas vezes
+Note: the source lives in the `1/` subfolder rather than directly in this challenge's root; run command adjusted accordingly.
