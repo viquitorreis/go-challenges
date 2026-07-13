@@ -40,6 +40,7 @@ Most Go concurrency resources stop at "here's how goroutines and channels work."
 | 20 | [Fan-out/Fan-in Rate Limiter](./20-fan-out-fan-in-rate-limiter) | Concurrency | N workers (fan-out) sharing one global rate limit via a shared `time.Ticker`, with all results converging back into a single channel (fan-in). |
 | 21 | [Concurrent Log File Analyzer](./21-concurrent-log-file-analyzer) | Concurrency / I/O | Single sequential reader (`bufio.Scanner`) feeding N parsing workers, with one aggregator goroutine collecting counts - a template for CPU-bound-per-line log processing without loading the file into memory. |
 | 22 | [TCP Multiplexed Stream Broker](./22-tcp_multiplexed_stream_broker) | Networking | Raw TCP broker with manual length-prefixed framing and topic multiplexing over a single connection; a centralized single-goroutine broker (register/unregister/broadcast via channels) plus per-connection read/write pumps. |
+| 23 | [UDP Raw Client/Server with Simulated Loss](./23-udp_raw_client_server) | Networking | Connectionless UDP server tracking clients by address string (no `net.Conn` to key on), with configurable packet-loss simulation; client fires a burst of numbered messages without per-message acknowledgment, then reads back echoes within a single deadline window and reports which sequence numbers never returned. |
 
 ## How to run
 
