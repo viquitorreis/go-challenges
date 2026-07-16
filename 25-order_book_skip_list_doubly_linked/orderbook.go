@@ -1,9 +1,9 @@
 package main
 
 import (
-	"container/heap"
 	"container/list"
 	"log/slog"
+	"math/rand"
 	"sync"
 	"time"
 )
@@ -45,32 +45,20 @@ type OrderBook struct {
 	Symbol string
 
 	// price -> all bids for the price (people trying to buy on that price)
-	bids     map[int]*PriceLevel
-	bidsHeap *bidsHeap
-
+	bidsIndex *SkipList
 	// price -> all asks for the price (people trying to sell on that price)
-	asks     map[int]*PriceLevel
-	asksHeap *asksHeap
+	asksIndex *SkipList
 
 	tracker map[string]*list.Element
-
-	mu sync.RWMutex
+	mu      sync.RWMutex
 }
 
 func NewOrderBook(symbol string) *OrderBook {
-	bh := &bidsHeap{}
-	heap.Init(bh)
-
-	ah := &asksHeap{}
-	heap.Init(ah)
-
 	return &OrderBook{
-		Symbol:   symbol,
-		bidsHeap: bh,
-		bids:     map[int]*PriceLevel{},
-		asksHeap: ah,
-		asks:     map[int]*PriceLevel{},
-		tracker:  make(map[string]*list.Element),
+		Symbol:    symbol,
+		bidsIndex: NewSkipList(16, Bid, 0.5, rand.New(rand.NewSource(42))),
+		asksIndex: NewSkipList(16, Ask, 0.5, rand.New(rand.NewSource(42))),
+		tracker:   make(map[string]*list.Element),
 	}
 }
 
@@ -92,17 +80,18 @@ func (ob *OrderBook) AddOrder(o *Order) {
 
 	switch o.Side {
 	case Bid:
-		level, exists := ob.bids[o.Price]
-		if !exists {
+		var level *PriceLevel
+
+		if v, ok := ob.bidsIndex.Search(o.Price); ok {
+			level = v.(*PriceLevel)
+		} else {
 			level = &PriceLevel{
 				Price:  o.Price,
 				Orders: list.New(),
 				Side:   Bid,
 			}
 
-			ob.bids[o.Price] = level
-
-			heap.Push(ob.bidsHeap, o.Price)
+			ob.bidsIndex.Insert(o.Price, level)
 		}
 
 		// push back because its a FIFO
@@ -110,17 +99,18 @@ func (ob *OrderBook) AddOrder(o *Order) {
 
 		ob.tracker[o.ID] = el
 	case Ask:
-		level, exists := ob.asks[o.Price]
-		if !exists {
+		var level *PriceLevel
+
+		if v, ok := ob.asksIndex.Search(o.Price); ok {
+			level = v.(*PriceLevel)
+		} else {
 			level = &PriceLevel{
 				Price:  o.Price,
 				Orders: list.New(),
 				Side:   Ask,
 			}
 
-			ob.asks[o.Price] = level
-
-			heap.Push(ob.asksHeap, o.Price)
+			ob.asksIndex.Insert(o.Price, level)
 		}
 
 		// push back because its a FIFO
@@ -138,22 +128,13 @@ func (ob *OrderBook) Match() []Trade {
 	defer ob.mu.Unlock()
 
 	res := []Trade{}
+
 	// keep filling the order, always starting from the cheapest ask
-	for ob.asksHeap.Len() > 0 && ob.bidsHeap.Len() > 0 && (*ob.bidsHeap)[0] >= (*ob.asksHeap)[0] {
-		bestBidPrice := (*ob.bidsHeap)[0]
-		bestAskPrice := (*ob.asksHeap)[0]
-
-		bidLevel := ob.bids[bestBidPrice]
-		askLevel := ob.asks[bestAskPrice]
-
-		if bidLevel == nil || bidLevel.Orders.Len() == 0 {
-			heap.Pop(ob.bidsHeap)
-			continue
-		}
-
-		if askLevel == nil || askLevel.Orders.Len() == 0 {
-			heap.Pop(ob.asksHeap)
-			continue
+	for {
+		bidLevel, hasBid := ob.bidsIndex.Front()
+		askLevel, hasAsk := ob.asksIndex.Front()
+		if !hasBid || !hasAsk || bidLevel.Price < askLevel.Price {
+			break
 		}
 
 		bidElem := bidLevel.Orders.Front()
@@ -177,13 +158,11 @@ func (ob *OrderBook) Match() []Trade {
 		}
 
 		if bidLevel.Orders.Len() == 0 {
-			delete(ob.bids, bestBidPrice)
-			heap.Pop(ob.bidsHeap)
+			ob.bidsIndex.Delete(bidLevel.Price)
 		}
 
 		if askLevel.Orders.Len() == 0 {
-			delete(ob.asks, bestAskPrice)
-			heap.Pop(ob.asksHeap)
+			ob.asksIndex.Delete(askLevel.Price)
 		}
 
 		res = append(res, Trade{
@@ -208,42 +187,24 @@ func (ob *OrderBook) Cancel(orderID string) bool {
 
 	order := elem.Value.(*Order)
 
-	var levels map[int]*PriceLevel
+	var index *SkipList
 	if order.Side == Bid {
-		levels = ob.bids
+		index = ob.bidsIndex
 	} else {
-		levels = ob.asks
+		index = ob.asksIndex
 	}
 
-	level := levels[order.Price]
+	v, ok := index.Search(order.Price)
+	if !ok {
+		return false
+	}
+
+	level := v.(*PriceLevel)
 	level.Orders.Remove(elem)
 	delete(ob.tracker, orderID)
 
 	if level.Orders.Len() == 0 {
-		delete(levels, order.Price)
-
-		// filter heap
-		if order.Side == Bid {
-			newHeap := bidsHeap{}
-			for _, p := range *ob.bidsHeap {
-				if p != order.Price {
-					newHeap = append(newHeap, p)
-				}
-			}
-
-			ob.bidsHeap = &newHeap
-			heap.Init(ob.bidsHeap)
-		} else {
-			newHeap := asksHeap{}
-			for _, p := range *ob.asksHeap {
-				if p != order.Price {
-					newHeap = append(newHeap, p)
-				}
-			}
-
-			ob.asksHeap = &newHeap
-			heap.Init(ob.asksHeap)
-		}
+		index.Delete(order.Price)
 	}
 
 	return true
@@ -253,10 +214,9 @@ func (ob *OrderBook) BidDepth() int {
 	count := 0
 
 	ob.mu.RLock()
-	for _, level := range ob.bids {
+	for _, level := range ob.bidsIndex.All() {
 		for e := level.Orders.Front(); e != nil; e = e.Next() {
-			o := e.Value.(*Order)
-			count += o.Quantity
+			count += e.Value.(*Order).Quantity
 		}
 	}
 	ob.mu.RUnlock()
@@ -268,10 +228,9 @@ func (ob *OrderBook) AskDepth() int {
 	count := 0
 
 	ob.mu.RLock()
-	for _, level := range ob.asks {
+	for _, level := range ob.asksIndex.All() {
 		for e := level.Orders.Front(); e != nil; e = e.Next() {
-			o := e.Value.(*Order)
-			count += o.Quantity
+			count += e.Value.(*Order).Quantity
 		}
 	}
 	ob.mu.RUnlock()

@@ -4,7 +4,7 @@
 
 ![Go Version](https://img.shields.io/badge/Go-1.22%2B-00ADD8?logo=go)
 
-A collection of 22 self-designed, senior-level Go challenges built to deepen practical knowledge of concurrency, network programming, and distributed systems patterns the kind of problems that show up in real backend systems and distributed systems and in interviews at infrastructure-focused companies.
+A collection of 25 self-designed, senior-level Go challenges built to deepen practical knowledge of concurrency, network programming, and distributed systems patterns the kind of problems that show up in real backend systems and distributed systems and in interviews at infrastructure-focused companies.
 
 I built these for myself because I couldn't find resources that went beyond "here's how goroutines and channels work" into the trade-offs that actually matter in production: lock granularity, backpressure, graceful shutdown, idempotency under retries, consensus. Sharing them in case they're useful for other engineers preparing for the same kind of interviews.
 
@@ -42,6 +42,7 @@ Most Go concurrency resources stop at "here's how goroutines and channels work."
 | 22 | [TCP Multiplexed Stream Broker](./22-tcp_multiplexed_stream_broker) | Networking | Raw TCP broker with manual length-prefixed framing and topic multiplexing over a single connection; a centralized single-goroutine broker (register/unregister/broadcast via channels) plus per-connection read/write pumps. |
 | 23 | [UDP Raw Client/Server with Simulated Loss](./23-udp_raw_client_server) | Networking | Connectionless UDP server tracking clients by address string (no `net.Conn` to key on), with configurable packet-loss simulation; client fires a burst of numbered messages without per-message acknowledgment, then reads back echoes within a single deadline window and reports which sequence numbers never returned. |
 | 24 | [Reliable UDP: Seq Number + ACK + Retransmit](./24-udp_reliable_retransmit) | Networking | Stop-and-wait reliability layer on top of raw UDP: every message carries an incrementing sequence number, and the client retransmits the identical datagram on timeout if no ACK arrives; the server always re-acknowledges, but tracks seen sequence numbers per client address so a retransmitted duplicate is never reprocessed, only re-acked, keeping the protocol idempotent under packet loss on either the request or the response. |
+| 25 | [Order Book Rewrite: Skip List + Doubly Linked Cancellation](./25-order_book_skip_list_doubly_linked) | Data Structures & Systems Design | Rewrites a heap-based matching engine's internals into a skip list ordered by price (replacing both the heap and the price-to-orders map with a single source of truth) plus a doubly linked list per price level (replacing a slice, so cancelling an order anywhere in the queue is O(1) instead of O(n)); documents the design tradeoffs, including why deleting a heap's arbitrary element forces an O(n log n) rebuild that a skip list avoids. |
 
 ## How to run
 
