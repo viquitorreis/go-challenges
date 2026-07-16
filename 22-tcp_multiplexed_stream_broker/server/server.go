@@ -47,30 +47,33 @@ func (s *Server) Boostrap(ctx context.Context) {
 	if err != nil {
 		log.Fatalf("err starting server: %v", err)
 	}
-	defer listener.Close()
-
 	s.listener = &listener
 
-	for {
-		select {
-		case <-ctx.Done():
-			slog.Info("server context closed", "msg", "bye")
-			return
-		default:
-			conn, err := listener.Accept()
-			if err != nil {
-				select {
-				case <-ctx.Done():
-					slog.Info("server context closed", "msg", "bye")
-					return
-				default:
-					slog.Error("error accepting connection", "error", err.Error())
-					continue
-				}
-			}
+	go func() {
+		<-ctx.Done()
+		slog.Info("shutting down listener")
+		listener.Close()
+	}()
 
-			go s.handleConn(conn)
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				slog.Info("server context closed", "msg", "bye")
+				return
+			default:
+				slog.Error("error accepting connection", "error", err.Error())
+				continue
+			}
 		}
+
+		// Set TCP_NODELAY to true to disable Nagle's algorithm for low-latency communication
+		if tc, ok := conn.(*net.TCPConn); ok {
+			tc.SetNoDelay(true)
+		}
+
+		go s.handleConn(conn)
 	}
 }
 
