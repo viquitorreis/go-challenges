@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"log/slog"
+	"math/rand"
 	"net"
 	"os"
 	"os/signal"
@@ -26,7 +27,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	server := NewServer(ln, ctx)
+	server := NewServer(ln, ctx, 0.1)
 
 	log.Println("server is up and running")
 
@@ -46,16 +47,18 @@ func main() {
 }
 
 type Server struct {
-	Conn *net.UDPConn
-	Msgs map[string]map[uint64]types.Message
-	Ctx  context.Context
+	Conn     *net.UDPConn
+	Msgs     map[string]map[uint64]types.Message
+	Ctx      context.Context
+	LossRate float64 // 0.0 a 1.0, to simulate, aplied on request and on ACK
 }
 
-func NewServer(conn *net.UDPConn, ctx context.Context) *Server {
+func NewServer(conn *net.UDPConn, ctx context.Context, lossRate float64) *Server {
 	return &Server{
-		Conn: conn,
-		Msgs: make(map[string]map[uint64]types.Message),
-		Ctx:  ctx,
+		Conn:     conn,
+		Msgs:     make(map[string]map[uint64]types.Message),
+		Ctx:      ctx,
+		LossRate: lossRate,
 	}
 }
 
@@ -72,6 +75,11 @@ func (s *Server) Read() {
 		if err != nil {
 			slog.Error("err reading from udp socket: %v", "error", err)
 			break
+		}
+
+		// simulating request Loss
+		if rand.Float64() < s.LossRate {
+			continue
 		}
 
 		msg, err := types.ParseMsg(buf[:n])
@@ -102,6 +110,11 @@ func (s *Server) Read() {
 }
 
 func (s *Server) Write(seq uint64, addr *net.UDPAddr) {
+	// simulating ACK loss
+	if rand.Float64() < s.LossRate {
+		return
+	}
+
 	ack := types.Message{
 		Cmd:     types.ACKCmd,
 		Content: []byte("SEQ"),

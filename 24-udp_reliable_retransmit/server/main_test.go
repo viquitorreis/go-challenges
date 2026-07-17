@@ -21,7 +21,7 @@ func startTestServer(t *testing.T) (addr *net.UDPAddr, cleanup func()) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	server := NewServer(conn, ctx)
+	server := NewServer(conn, ctx, 0.0)
 	go server.Read()
 
 	cleanup = func() {

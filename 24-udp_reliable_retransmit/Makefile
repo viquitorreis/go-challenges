@@ -6,6 +6,9 @@ CLIENT_BIN=client/bin/
 test:
 	@go test -v ./server/...
 	@go test -v ./client/...
+
+test-bench:
+	@go test -bench=BenchmarkReliability -benchtime=200x -v ./... 2>&1 | grep -E "loss_|PASS|FAIL"
 	
 build-server:
 	@mkdir -p ${SERVER_BIN} 
