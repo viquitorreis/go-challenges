@@ -64,3 +64,77 @@ func TestConcurrentAddOrders(t *testing.T) {
 	wg.Wait()
 	assert.Equal(t, 100, ob.BidDepth())
 }
+
+// BenchmarkCancelMiddleOfLevel mede o custo de cancelar UMA ordem específica
+// no meio da fila de um price level, variando quantas ordens existem nesse
+// nível. Isso expõe o Problema 2 do diagnóstico: []*Order não suporta
+// remoção O(1) do meio -- cada Cancel aqui escaneia o slice inteiro pra
+// reconstruí-lo sem a ordem removida.
+//
+// Setup (criar o book e popular N ordens) fica fora da região cronometrada
+// via StopTimer/StartTimer -- só o Cancel em si é medido.
+func BenchmarkCancelMiddleOfLevel(b *testing.B) {
+	sizes := []int{10, 100, 1_000, 10_000}
+
+	for _, n := range sizes {
+		b.Run(fmt.Sprintf("depth_%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+
+			for i := 0; i < b.N; i++ {
+				b.StopTimer()
+				ob := NewOrderBook("BTC-USD")
+				ids := make([]string, n)
+
+				for j := range n {
+					id := fmt.Sprintf("o%d", j)
+					ids[j] = id
+					ob.AddOrder(NewOrder(id, "user", Bid, 100, 1))
+				}
+
+				middleID := ids[n/2]
+				b.StartTimer()
+
+				ob.Cancel(middleID)
+			}
+		})
+	}
+}
+
+// BenchmarkCancelManyDistinctLevels mede o custo de cancelar N ordens, cada
+// uma num price level DIFERENTE (1 ordem por nível), esvaziando cada nível
+// no processo. Isso expõe o Problema 1 do diagnóstico: o heap não suporta
+// remoção arbitrária -- toda vez que um nível esvazia, o código atual
+// reconstrói o heap inteiro (O(n log n)) em vez de remover pontualmente.
+//
+// "ns/op" aqui representa o custo de cancelar TODAS as N ordens dentro de
+// uma iteração, não de uma única ordem -- divida por N pra comparar o custo
+// médio por cancelamento individual entre tamanhos diferentes.
+func BenchmarkCancelManyDistinctLevels(b *testing.B) {
+	sizes := []int{10, 100, 1_000, 10_000}
+
+	for _, n := range sizes {
+		b.Run(fmt.Sprintf("levels_%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+
+			for i := 0; i < b.N; i++ {
+				b.StopTimer()
+				ob := NewOrderBook("BTC-USD")
+				ids := make([]string, n)
+
+				for j := range n {
+					id := fmt.Sprintf("o%d", j)
+					ids[j] = id
+					// preço distinto por ordem -- cada uma vira seu próprio
+					// price level, com profundidade 1
+					ob.AddOrder(NewOrder(id, "user", Bid, 100+j, 1))
+				}
+
+				b.StartTimer()
+
+				for _, id := range ids {
+					ob.Cancel(id)
+				}
+			}
+		})
+	}
+}

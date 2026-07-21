@@ -37,3 +37,37 @@ make execute
 go run .
 go test ./...
 ```
+
+## Benchmark: Cancel Performance
+
+Measured against the [rewritten version using a skip list and doubly linked
+list](https://github.com/viquitorreis/distributed-matching-engine), which documents
+the full analysis.
+
+Run with `go test -bench=. -benchmem -benchtime=100x`.
+
+**Note**: benchmarks were performed on a amd64 12th Gen Intel(R) Core(TM) i5-1235U 32GB RAM machine
+
+**Cancelling a single order in the middle of a large price level:**
+
+| Level depth | ns/op | B/op | allocs/op |
+|---|---|---|---|
+| 10 | 1,342 | 192 | 2 |
+| 100 | 3,806 | 2,112 | 5 |
+| 1,000 | 21,912 | 17,472 | 8 |
+| 10,000 | 127,790 | 310,336 | 15 |
+
+**Cancelling N orders, each in its own price level (each cancellation empties
+a level):**
+
+| Distinct levels | ns/op (total for N cancels) | B/op | allocs/op |
+|---|---|---|---|
+| 10 | 4,049 | 1,120 | 40 |
+| 100 | 153,935 | 116,994 | 765 |
+| 1,000 | 8,683,372 | 11,651,964 | 11,117 |
+| 10,000 | 978,893,452 | 1,570,093,820 | 167,667 |
+
+At 10,000 distinct price levels, cancelling all of them takes close to 1
+second with this heap-based implementation, since every cancellation that
+empties a level triggers a full heap rebuild. See the rewritten version for
+the fix and the full breakdown.
