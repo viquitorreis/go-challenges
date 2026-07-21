@@ -1,5 +1,7 @@
 # Exchange Order Book
 
+**.:. Note**: A better version of this project was made on challenge 25, and evolved on a separate project. See [Distributed Matching Engine](https://github.com/viquitorreis/distributed_matching_engine) for full details of the implementation.
+
 🇧🇷 [Versão em Português](README.pt-br.md)
 
 **Category:** Data Structures
