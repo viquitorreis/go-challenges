@@ -35,9 +35,10 @@ type Trade struct {
 
 // PriceLevel groups all orders at the same price (FIFO queue)
 type PriceLevel struct {
-	Price  int
-	Orders *list.List
-	Side   Side
+	Price    int
+	Orders   *list.List
+	Side     Side
+	TotalQty int // sum of Quantity of all active orders on that level
 }
 
 // OrderBook maintains bids and asks for a single ticker
@@ -97,6 +98,8 @@ func (ob *OrderBook) AddOrder(o *Order) {
 		// push back because its a FIFO
 		el := level.Orders.PushBack(o)
 
+		level.TotalQty += o.Quantity
+
 		ob.tracker[o.ID] = el
 	case Ask:
 		var level *PriceLevel
@@ -115,6 +118,8 @@ func (ob *OrderBook) AddOrder(o *Order) {
 
 		// push back because its a FIFO
 		el := level.Orders.PushBack(o)
+
+		level.TotalQty += o.Quantity
 
 		ob.tracker[o.ID] = el
 
@@ -147,6 +152,9 @@ func (ob *OrderBook) Match() []Trade {
 		bestBid.Quantity -= orderQuantity
 		bestAsk.Quantity -= orderQuantity
 
+		bidLevel.TotalQty -= orderQuantity
+		askLevel.TotalQty -= orderQuantity
+
 		if bestBid.Quantity == 0 {
 			bidLevel.Orders.Remove(bidElem)
 			delete(ob.tracker, bestBid.ID)
@@ -171,8 +179,8 @@ func (ob *OrderBook) Match() []Trade {
 			Price:      bestAsk.Price,
 			Quantity:   orderQuantity,
 		})
-
 	}
+
 	return res
 }
 
@@ -201,6 +209,7 @@ func (ob *OrderBook) Cancel(orderID string) bool {
 
 	level := v.(*PriceLevel)
 	level.Orders.Remove(elem)
+	level.TotalQty -= order.Quantity
 	delete(ob.tracker, orderID)
 
 	if level.Orders.Len() == 0 {
@@ -215,9 +224,7 @@ func (ob *OrderBook) BidDepth() int {
 
 	ob.mu.RLock()
 	for _, level := range ob.bidsIndex.All() {
-		for e := level.Orders.Front(); e != nil; e = e.Next() {
-			count += e.Value.(*Order).Quantity
-		}
+		count += level.TotalQty
 	}
 	ob.mu.RUnlock()
 
@@ -229,9 +236,7 @@ func (ob *OrderBook) AskDepth() int {
 
 	ob.mu.RLock()
 	for _, level := range ob.asksIndex.All() {
-		for e := level.Orders.Front(); e != nil; e = e.Next() {
-			count += e.Value.(*Order).Quantity
-		}
+		count += level.TotalQty
 	}
 	ob.mu.RUnlock()
 
