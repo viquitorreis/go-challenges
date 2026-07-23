@@ -236,3 +236,72 @@ allocation-free O(1) cancellation regardless of price level depth. Track A
 churny order books (many price levels, frequent cancellations) into a
 near-linear O(n log n) cost, a 241x improvement at 10,000 price levels that
 keeps growing with scale.
+
+## Load Test Stage 1: Single Node implementation, Concurrency Under Contention
+
+Simulates a realistic order flow (70% cancel, 20% add, 10% match) across
+increasing levels of concurrent goroutines, measuring throughput and
+per-operation latency.
+
+Run with `go test -run TestLoad -v ./...`.
+
+| Workers | Total ops | Throughput | p50 | p99 |
+|---|---|---|---|---|
+| 1 | 500 | 2,301,867 ops/s | 248ns | 2.5µs |
+| 10 | 5,000 | 1,207,425 ops/s | 384ns | 134µs |
+| 50 | 25,000 | 1,055,594 ops/s | 476ns | 1.1ms |
+| 100 | 50,000 | 1,137,860 ops/s | 438ns | 2.2ms |
+
+### What's actually happening: lock contention
+
+The `OrderBook` uses a single `sync.RWMutex` guarding `AddOrder`, `Cancel`,
+and `Match`. Every operation, no matter how small, has to wait its turn to
+acquire that lock before doing any real work.
+
+With 1 worker, there's no one to wait for, so latency stays low and
+consistent. As soon as more goroutines compete for the same lock, two
+things happen at once:
+
+- **Throughput drops immediately** (1 -> 10 workers: from 2.3M to 1.2M
+  ops/s), because CPU time that used to go toward useful work now goes
+  toward goroutines sitting idle, waiting for the lock
+- **p99 grows far faster than p50** (2.5µs -> 2.2ms, roughly 900x, while
+  p50 only moves from 248ns to 438ns). Most operations still complete
+  quickly once they get the lock. But a growing share of them get stuck
+  waiting behind everyone else in line, and those are the ones that blow
+  up the tail latency
+
+This is the general shape lock contention takes: the median barely moves,
+while the tail gets dramatically worse. A dashboard showing only average
+latency would completely miss this.
+
+### Why throughput flattens instead of climbing
+
+Past 10 workers, throughput stays roughly flat (~1.0-1.1M ops/s) instead
+of continuing to fall or rise. That's the mutex fully saturated: the
+system is already spending as much time serializing access to the lock as
+it's going to. Adding more goroutines beyond that point doesn't help or
+hurt much, it just makes the queue behind the lock longer, which is
+exactly what the growing p99 shows.
+
+### Something worth being honest about
+
+`p50=248ns` for an operation that includes a skip list lookup and a linked
+list mutation looks suspiciously fast. Likely explanation: with 70% of
+operations being `Cancel` on a randomly picked ID out of only 1,000 seeded
+orders, a meaningful share of those calls hit `if !exists { return false }`
+immediately, without doing real work, because another goroutine already
+cancelled that ID first. That doesn't invalidate the contention pattern
+(the lock queue is real either way), but it does mean the raw throughput
+number is somewhat inflated. A more accurate benchmark would guarantee
+each cancel targets an order that's actually still live.
+
+### Takeaway
+
+The data structure rewrite (skip list + doubly linked list) did its job:
+individual operations are fast. The current ceiling isn't algorithmic
+complexity anymore, it's the single mutex serializing all access. That's
+the concrete argument for the planned move toward either sharding the
+lock (e.g. per price-level locks) or an actor-style design (a single
+goroutine owning book state, everyone else talking to it over channels,
+no lock at all) as this evolves into the distributed matching engine.
