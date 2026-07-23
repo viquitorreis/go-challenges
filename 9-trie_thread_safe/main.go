@@ -8,7 +8,7 @@ import (
 func main() {
 	trie := NewTrie()
 
-	fmt.Println("=== Testando Insert e Search ===")
+	fmt.Println("=== Testing Insert e Search ===")
 	words := []string{"cat", "car", "card", "care", "careful", "dog", "dodge", "door"}
 
 	for _, word := range words {
@@ -16,32 +16,32 @@ func main() {
 		fmt.Printf("Inserted: %s\n", word)
 	}
 
-	fmt.Println("\n=== Testando Search (exact match) ===")
+	fmt.Println("=== Testing Search (exact match) ===")
 	testWords := []string{"car", "card", "careful", "cat", "can", "do"}
 	for _, word := range testWords {
 		found := trie.Search(word)
 		fmt.Printf("Search('%s'): %v\n", word, found)
 	}
 
-	fmt.Println("\n=== Testando StartsWith ===")
+	fmt.Println("=== Testing StartsWith ===")
 	prefixes := []string{"ca", "car", "do", "doo", "cat", "x"}
 	for _, prefix := range prefixes {
 		exists := trie.StartsWith(prefix)
 		fmt.Printf("StartsWith('%s'): %v\n", prefix, exists)
 	}
 
-	fmt.Println("\n=== Testando AutoComplete ===")
+	fmt.Println("=== Testing AutoComplete ===")
 	testPrefixes := []string{"ca", "car", "do"}
 	for _, prefix := range testPrefixes {
 		suggestions := trie.AutoComplete(prefix, 5)
 		fmt.Printf("AutoComplete('%s', limit=5): %v\n", prefix, suggestions)
 	}
 
-	fmt.Println("\n=== Testando AutoComplete sem limite ===")
+	fmt.Println("=== Testing AutoComplete without limit ===")
 	allCar := trie.AutoComplete("car", 0)
 	fmt.Printf("AutoComplete('car', no limit): %v\n", allCar)
 
-	fmt.Println("\n=== Testando operações concorrentes ===")
+	fmt.Println("=== Testing concurrent operations ===")
 	var wg sync.WaitGroup
 
 	// 10 goroutines inserindo palavras simultaneamente
@@ -78,13 +78,13 @@ func main() {
 
 	wg.Wait()
 
-	fmt.Println("\n=== Verificando palavras inseridas concorrentemente ===")
+	fmt.Println("=== Verifying words inserted concurrently ===")
 	for _, word := range newWords {
 		found := trie.Search(word)
 		fmt.Printf("Search('%s'): %v\n", word, found)
 	}
 
-	fmt.Println("\n=== Testando AutoComplete em 'can' ===")
+	fmt.Println("=== Testing Autocomplete in 'can' ===")
 	canWords := trie.AutoComplete("can", 10)
 	fmt.Printf("AutoComplete('can'): %v\n", canWords)
 }
@@ -109,11 +109,9 @@ func NewTrie() *Trie {
 }
 
 func (t *Trie) Insert(word string) {
-	fmt.Printf("\n=== Inserindo '%s' ===\n", word)
 	curr := t.root
 
-	for i, char := range word {
-		fmt.Printf("Iteração %d, char='%c'\n", i, char)
+	for _, char := range word {
 		curr.mu.Lock()
 		val, ok := curr.children[char]
 		if !ok {

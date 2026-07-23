@@ -15,9 +15,9 @@ func main() {
 	// Configurar callback para notificações
 	poller.onStatusChange = func(endpoint string, oldStatus, newStatus bool) {
 		if newStatus && !oldStatus {
-			fmt.Printf("✅ %s is now HEALTHY\n", endpoint)
+			fmt.Printf("%s is now HEALTHY\n", endpoint)
 		} else if !newStatus && oldStatus {
-			fmt.Printf("❌ %s is now UNHEALTHY\n", endpoint)
+			fmt.Printf("%s is now UNHEALTHY\n", endpoint)
 		}
 	}
 

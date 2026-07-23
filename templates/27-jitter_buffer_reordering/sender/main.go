@@ -3,13 +3,13 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"jitter_buffer/protocol"
 	"log"
 	"log/slog"
 	"math/rand"
 	"net"
 	"os"
 	"os/signal"
-	"rtp_packetizer/protocol"
 	"syscall"
 	"time"
 )
@@ -49,7 +49,7 @@ func main() {
 type Sender struct {
 	ctx        context.Context
 	Conn       net.Conn
-	LastSeqNum uint32
+	LastSeqNum uint64
 	Interval   time.Duration
 }
 
@@ -97,7 +97,7 @@ func (s *Sender) Send() {
 
 func (s *Sender) Generate() protocol.RTPDatagram {
 	msg := protocol.RTPDatagram{
-		Payload:   uint16(rand.Uint32()),
+		Payload:   rand.Uint64(),
 		SeqNumber: s.LastSeqNum,
 		Timestamp: uint64(time.Now().UnixMilli()),
 	}
