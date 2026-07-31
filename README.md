@@ -4,7 +4,7 @@
 
 ![Go Version](https://img.shields.io/badge/Go-1.22%2B-00ADD8?logo=go)
 
-A collection of 26 self-designed, senior-level Go challenges built to deepen practical knowledge of concurrency, network programming, and distributed systems patterns the kind of problems that show up in real backend systems and distributed systems and in interviews at infrastructure-focused companies.
+A collection of 27 self-designed, senior-level Go challenges built to deepen practical knowledge of concurrency, network programming, and distributed systems patterns the kind of problems that show up in real backend systems and distributed systems and in interviews at infrastructure-focused companies.
 
 I built these for myself because I couldn't find resources that went beyond "here's how goroutines and channels work" into the trade-offs that actually matter in production: lock granularity, backpressure, graceful shutdown, idempotency under retries, consensus. Sharing them in case they're useful for other engineers preparing for the same kind of interviews.
 
