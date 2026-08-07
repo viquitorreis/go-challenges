@@ -1,10 +1,13 @@
 # INTER-REPLICA COMMUNICATION PROTOCOL
+
 **Categoria**: Distributed
-**Tempo**: 3h
+**Tempo**: 2h
 **Builda em cima de**: distributed_matching_engine (order book single-node) + framing binário do stream broker (tcp-multiplexed-stream-broker)
 
 ## Estudo antes (10-15min):
+
 ### Replicação simples vs consenso
+
 Por que o order book não precisa de Raft completo pra ter consistência aceitável?
 A ideia central: quorum de escrita (W) sobre um conjunto de N réplicas garante que
 qualquer leitura subsequente com quorum de leitura (R) enxerga o dado mais
@@ -14,6 +17,7 @@ mais barato de propagar e dá replay determinístico; snapshot é mais simples
 de aplicar mas mais pesado. Isso precisa ser decidido antes de codar.
 
 ## Contexto
+
 O order book até agora roda num processo só. Pra virar distribuído
 de verdade, os nós precisam trocar mensagens entre si quem primary, quem
 replica, quando uma escrita é considerada "commitada". Hoje você constrói só
@@ -21,6 +25,7 @@ o canal e o protocolo de mensagens entre réplicas, não a lógica de decisão
 de quorum ainda (isso é o próximo challenge).
 
 O que construir:
+
 1. Reaproveitar o framing length-prefix (4 bytes tamanho + payload) já usado
    no stream broker como base do protocolo inter-réplica, não reinventar
    framing novo
@@ -37,6 +42,7 @@ O que construir:
    volta, e todos trocam Heartbeat em intervalo fixo (ex: a cada 200ms)
 
 ## Requisitos obrigatórios:
+
 - Framing reaproveitado do stream broker, não uma versão nova
 - Serialização das 3 mensagens (pode ser struct + encoding/gob, ou binário
   manual, sua escolha, mas documente o porquê)
