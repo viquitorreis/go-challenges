@@ -24,14 +24,26 @@ func Handshake(conn net.Conn, f *framing.Framing, localAddr string) (string, err
 
 	// sends its address to other peer
 	payload := append([]byte{byte(MsgHello)}, body.Bytes()...)
-	if err := f.Write(conn, payload); err != nil {
-		return "", fmt.Errorf("write hello: %w", err)
-	}
+
+	// Write in a separate goroutine so it never blocks this call from
+	// reaching Read. This matters for transports without OS-level
+	// buffering (like net.Pipe in tests) without it, both sides can
+	// deadlock waiting on each other's Write to be consumed before
+	// either calls Read. Real TCP sockets usually mask this with
+	// kernel buffering, but relying on that would be fragile.
+	writeErrCh := make(chan error, 1)
+	go func() {
+		writeErrCh <- f.Write(conn, payload)
+	}()
 
 	// waits for peer response
 	resp, err := f.Read(conn)
 	if err != nil {
 		return "", fmt.Errorf("read hello: %w", err)
+	}
+
+	if writeErr := <-writeErrCh; writeErr != nil {
+		return "", fmt.Errorf("write hello: %w", writeErr)
 	}
 
 	if len(resp) < 1 || MessageType(resp[0]) != MsgHello {
