@@ -9,6 +9,7 @@ import (
 
 	"multi_node_p2p/cluster"
 	"multi_node_p2p/framing"
+	"multi_node_p2p/orderbook"
 	"multi_node_p2p/peer"
 )
 
@@ -65,7 +66,7 @@ func TestHandshake_ExchangesIdentity(t *testing.T) {
 func TestCluster_RejectsSecondConnectionSameIdentity(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cl := cluster.NewCluster(ctx)
+	cl := cluster.NewCluster(ctx, "localhost:9002", orderbook.NewOrderBook("BTC-USD"))
 	f := framing.NewFraming(4)
 
 	// First connection for identity "localhost:9002" should register.
