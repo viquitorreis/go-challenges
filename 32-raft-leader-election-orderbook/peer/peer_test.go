@@ -7,6 +7,7 @@ import (
 	"raft_orderbook/framing"
 	"raft_orderbook/orderbook"
 	"raft_orderbook/peer"
+	"raft_orderbook/raft"
 	"slices"
 	"testing"
 	"time"
@@ -65,7 +66,13 @@ func TestHandshake_ExchangesIdentity(t *testing.T) {
 func TestCluster_RejectsSecondConnectionSameIdentity(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cl := cluster.NewCluster(ctx, "localhost:9002", orderbook.NewOrderBook("BTC-USD"))
+
+	cl := cluster.NewCluster(
+		ctx,
+		"localhost:9002",
+		orderbook.NewOrderBook("BTC-USD"),
+		raft.NewRaft(uint64(2)),
+	)
 	f := framing.NewFraming(4)
 
 	// First connection for identity "localhost:9002" should register.

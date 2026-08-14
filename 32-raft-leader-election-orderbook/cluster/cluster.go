@@ -296,3 +296,11 @@ func (c *Cluster) applyCommitted(id string) {
 func (c *Cluster) GetOrders() []orderbook.Order {
 	return c.ob.AllOrders()
 }
+
+func (c *Cluster) IsLeader() bool {
+	return c.raft.IsLeader()
+}
+
+func (c *Cluster) CurrentTerm() uint64 {
+	return c.raft.CurrentTerm()
+}
